@@ -1,3 +1,4 @@
+import gradio as gr
 from youtube_transcript_api import YouTubeTranscriptApi
 import yt_dlp
 
@@ -50,22 +51,37 @@ def save_transcript_as_markdown(transcript, metadata, output_file="transcript.md
             md_file.write(f"- **Channel**: {metadata['channel']}\n")
             md_file.write(f"- **Description**: {metadata['description']}\n")
             md_file.write(f"- **Publish Date**: {metadata['publish_date']}\n")
+            md_file.write(f"- **View Count**: {metadata['view_count']}\n")
             md_file.write("---\n\n")
             
             # Write the transcript
             md_file.write("## Transcript\n\n")
             md_file.write(transcript)
-        print(f"Transcript saved as Markdown file: {output_file}")
+        return output_file
     except Exception as e:
-        print(f"Error saving transcript: {e}")
+        return f"Error saving transcript: {e}"
 
-if __name__ == "__main__":
-    video_url = input("Enter YouTube video URL: ")
+def process_video(video_url):
     video_id = video_url.split("v=")[-1].split("&")[0]  # Extract video ID
-    
-    # Get metadata and transcript
     metadata = get_video_metadata(video_url)
     transcript_text = get_youtube_transcript(video_id)
+    output_file = f"{metadata['title']}.md"
+    save_transcript_as_markdown(transcript_text, metadata, output_file)
+    return output_file
+
+# Gradio Interface
+def gradio_interface(video_url):
+    output_file = process_video(video_url)
+    return output_file
+
+with gr.Blocks() as demo:
+    gr.Markdown("# YouTube Transcript Extractor")
+    with gr.Row():
+        video_url_input = gr.Textbox(label="YouTube Video URL", placeholder="Enter YouTube video URL here...")
+        download_button = gr.File(label="Download Markdown File")
+    submit_button = gr.Button("Generate Transcript")
     
-    # Save the transcript as a Markdown file with metadata
-    save_transcript_as_markdown(transcript_text, metadata, output_file=f"{metadata['title']}.md")
+    submit_button.click(gradio_interface, inputs=video_url_input, outputs=download_button)
+
+# demo.launch(share=True)
+demo.launch(share=True)
