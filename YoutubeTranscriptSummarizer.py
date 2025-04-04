@@ -1,30 +1,41 @@
 import gradio as gr
 from youtube_transcript_api import YouTubeTranscriptApi
-import yt_dlp
+from googleapiclient.discovery import build
 import os
-from openai import OpenAI
+import openai
+import anthropic
+from dotenv import load_dotenv
 
-def get_video_metadata(video_url):
-    ydl_opts = {
-        "quiet": True,
-        "extract_flat": False,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(video_url, download=False)
+
+load_dotenv()
+os.environ['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', 'your-key-if-not-using-env')
+os.environ['ANTHROPIC_API_KEY'] = os.getenv('ANTHROPIC_API_KEY', 'your-key-if-not-using-env')
+os.environ['GOOGLE_API_KEY'] = os.getenv('GOOGLE_API_KEY', 'your-key-if-not-using-env')
+
+
+def get_video_metadata(video_id):
+    youtube = build('youtube', 'v3', developerKey=os.environ['GOOGLE_API_KEY'])
+    request = youtube.videos().list(part="snippet,statistics", id=video_id)
+    response = request.execute()
     
-    metadata = {
-        "title": info.get("title"),
-        "channel": info.get("uploader"),
-        "channel_id": info.get("channel_id"),
-        "description": info.get("description"),
-        "publish_date": info.get("upload_date"),
-        "view_count": info.get("view_count"),
-        "like_count": info.get("like_count"),
-        "dislike_count": info.get("dislike_count"),  # May not be available
-        "duration": info.get("duration"),  # In seconds
-    }
-    
-    return metadata
+    if "items" in response and len(response["items"]) > 0:
+        video_data = response["items"][0]
+        metadata = {
+            "title": video_data["snippet"]["title"],
+            "channel": video_data["snippet"]["channelTitle"],
+            "description": video_data["snippet"]["description"],
+            "publish_date": video_data["snippet"]["publishedAt"],
+            "view_count": video_data["statistics"]["viewCount"]
+        }
+        return metadata
+    else:
+        return {
+            "title": "Unknown",
+            "channel": "Unknown",
+            "description": "Unknown",
+            "publish_date": "Unknown",
+            "view_count": "Unknown"
+        }
 
 def get_youtube_transcript(video_id):
     try:
@@ -65,7 +76,7 @@ def save_transcript_as_markdown(transcript, metadata, output_file="transcript.md
 
 def process_video(video_url):
     video_id = video_url.split("v=")[-1].split("&")[0]  # Extract video ID
-    metadata = get_video_metadata(video_url)
+    metadata = get_video_metadata(video_id)  # Pass the correct video_id here
     transcript_text = get_youtube_transcript(video_id)
     output_file = f"{metadata['title']}.md"
     save_transcript_as_markdown(transcript_text, metadata, output_file)
@@ -139,35 +150,104 @@ def get_ollama_response(model, user_message, system_message=None):
     api_messages.append({"role": "user", "content": user_message})
 
     # MODEL = "llama3.2"
-
     # if not installed, !ollama pull deepseek-r1:7b
-    ollama_via_openai = OpenAI(base_url='http://localhost:11434/v1', api_key='ollama')
-    response = ollama_via_openai.chat.completions.create(
-        model=model,
-        messages=api_messages
-    )
-    response_content = response.choices[0].message.content
-    return response_content
+    try:
+        ollama_via_openai = openai.OpenAI(base_url='http://localhost:11434/v1', api_key='ollama')
+        # response = ollama_via_openai.chat.completions.create(
+        #     model=model,
+        #     messages=api_messages,
+        # )
+        # response_content = response.choices[0].message.content
+        # return response_content
+        stream = ollama_via_openai.chat.completions.create(
+            model=model,
+            messages=api_messages,
+            stream=True,
+        )
+        reply = ""
+        for chunk in stream:
+            fragment = chunk.choices[0].delta.content or ""
+            reply += fragment
+            # print(fragment, end='', flush=True)
+            yield fragment
+        return reply
+    except Exception as e:
+        return f"Error generating response: {e}"
 
-def gradio_interface(video_url):
+def get_openai_response(model, user_message, system_message=None):
+    try:
+        messages = []
+        if system_message:
+            messages.append({"role": "system", "content": system_message})
+        messages.append({"role": "user", "content": user_message})
+
+        stream = openai.chat.completions.create(model=model, messages=messages, stream=True)
+        reply = ""
+        for chunk in stream:
+            fragment = chunk.choices[0].delta.content or ""
+            reply += fragment
+            # print(fragment, end='', flush=True)
+            yield fragment
+        return reply
+    except Exception as e:
+        return f"Error generating response: {e}"
+
+def get_anthopic_claude_response(model, user_message, system_message=None):
+    try:
+        claude = anthropic.Anthropic()
+        if system_message:
+            result = claude.messages.stream(
+                model=model,
+                max_tokens=2000,
+                system=system_message,
+                messages=[{"role": "user", "content": user_message}],)
+        else:
+            result = claude.messages.stream(
+                model=model,
+                max_tokens=2000,
+                messages=[{"role": "user", "content": user_message}],)
+        
+        reply = ""
+        with result as stream:
+            for text in stream.text_stream:
+                reply += text
+                print(text, end="", flush=True)
+                
+        return reply
+    except Exception as e:
+        return f"Error generating response: {e}"
+
+def gradio_interface(video_url, model_choice):
     """
-    Processes the YouTube video URL, extracts the transcript, and generates a summary.
-
+    gradio interface function to process the video URL and model choice.
     Args:
         video_url (str): The YouTube video URL.
-
+        model_choice (str): The model choice ("Claude" or "OpenAI").
     Returns:
-        tuple: The transcript, the summary, and file paths for downloading.
+        tuple: The transcript text and summary.
     """
     video_id = video_url.split("v=")[-1].split("&")[0]  # Extract video ID
-    metadata = get_video_metadata(video_url)
+    metadata = get_video_metadata(video_id)
     transcript_text = get_youtube_transcript(video_id)
     
     user_message = f"Summarize the following transcript:\n\n{transcript_text}"
-    # Generate a summary (placeholder logic, replace with actual summarization logic)
     summary = f"Summary of the video '{metadata['title']}':\n\n"
-    summary += get_ollama_response("cognitivetech/obook_summary:q4_k_m", user_message, system_message="You are a helpful assistant that summarizes transcripts.")
-
+    
+    # Display the summary in real-time and collect all yielded values
+    # choose to call get_openai_response or get_anthopic_claude_response based on the variable
+    if model_choice == "Ollama":
+        # for fragment in get_ollama_response("llama3.2:latest", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
+        for fragment in get_ollama_response("cognitivetech/obook_summary:q4_k_m", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
+            summary += fragment
+            yield transcript_text, summary, None, None  # Update the summary_output in real-time
+    elif model_choice == "Claude":
+        for fragment in get_anthopic_claude_response("claude-3-5-sonnet-20240620", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
+            summary += fragment
+            yield transcript_text, summary, None, None  # Update the summary_output in real-time
+    elif model_choice == "OpenAI":
+        for fragment in get_openai_response("gpt-4o-mini", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
+            summary += fragment
+            yield transcript_text, summary, None, None  # Update the summary_output in real-time
     
     # Save transcript and summary to files
     transcript_file = f"{metadata['title']}_transcript.md"
@@ -175,7 +255,7 @@ def gradio_interface(video_url):
     save_transcript_as_markdown(transcript_text, metadata, transcript_file)
     write_response_to_file(summary, summary_file)
     
-    return transcript_text, summary, transcript_file, summary_file
+    yield transcript_text, summary, transcript_file, summary_file  # Final output with file paths
 
 def main():
     with gr.Blocks() as demo:
@@ -183,10 +263,11 @@ def main():
         
         with gr.Row():
             video_url_input = gr.Textbox(label="YouTube Video URL", placeholder="Enter YouTube video URL here...")
+            model_dropdown = gr.Dropdown(
+                choices=["Ollama", "Claude", "OpenAI"], label="Model", value="Ollama"
+            )
         
         with gr.Row():
-            # transcript_output = gr.Textbox(label="Transcript", lines=10, interactive=False)
-            # summary_output = gr.Textbox(label="Summary", lines=10, interactive=False)
             transcript_output = gr.Markdown(label="Transcript")
             summary_output = gr.Markdown(label="Summary")
         
@@ -199,11 +280,11 @@ def main():
         # Connect the interface components
         submit_button.click(
             gradio_interface,
-            inputs=video_url_input,
+            inputs=[video_url_input, model_dropdown],
             outputs=[transcript_output, summary_output, download_transcript_button, download_summary_button]
         )
 
-    demo.launch()
+    demo.launch(share=True)
 
 
 if __name__ == "__main__":
