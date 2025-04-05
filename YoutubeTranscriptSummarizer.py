@@ -306,7 +306,7 @@ def main():
             outputs=[transcript_output, summary_output, download_transcript_button, download_summary_button]
         )
 
-    demo.launch(share=True)
+    demo.launch()
 
 
 if __name__ == "__main__":
