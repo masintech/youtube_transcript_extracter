@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 os.environ['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', 'your-key-if-not-using-env')
 os.environ['ANTHROPIC_API_KEY'] = os.getenv('ANTHROPIC_API_KEY', 'your-key-if-not-using-env')
+os.environ['DEEPSEEK_API_KEY'] = os.getenv('DEEPSEEK_API_KEY', 'your-key-if-not-using-env')
 os.environ['GOOGLE_API_KEY'] = os.getenv('GOOGLE_API_KEY', 'your-key-if-not-using-env')
 
 
@@ -153,12 +154,6 @@ def get_ollama_response(model, user_message, system_message=None):
     # if not installed, !ollama pull deepseek-r1:7b
     try:
         ollama_via_openai = openai.OpenAI(base_url='http://localhost:11434/v1', api_key='ollama')
-        # response = ollama_via_openai.chat.completions.create(
-        #     model=model,
-        #     messages=api_messages,
-        # )
-        # response_content = response.choices[0].message.content
-        # return response_content
         stream = ollama_via_openai.chat.completions.create(
             model=model,
             messages=api_messages,
@@ -168,7 +163,6 @@ def get_ollama_response(model, user_message, system_message=None):
         for chunk in stream:
             fragment = chunk.choices[0].delta.content or ""
             reply += fragment
-            # print(fragment, end='', flush=True)
             yield fragment
         return reply
     except Exception as e:
@@ -217,6 +211,28 @@ def get_anthopic_claude_response(model, user_message, system_message=None):
     except Exception as e:
         return f"Error generating response: {e}"
 
+def get_deepseek_response(model, user_message, system_message=None):
+    api_messages = []
+    if system_message:
+        api_messages.append({"role": "system", "content": system_message})
+    api_messages.append({"role": "user", "content": user_message})
+
+    try:
+        deepseek_via_openai = openai.OpenAI(base_url='https://api.deepseek.com', api_key=os.environ['DEEPSEEK_API_KEY'])
+        stream = deepseek_via_openai.chat.completions.create(
+            model=model,
+            messages=api_messages,
+            stream=True,
+        )
+        reply = ""
+        for chunk in stream:
+            fragment = chunk.choices[0].delta.content or ""
+            reply += fragment
+            yield fragment
+        return reply
+    except Exception as e:
+        return f"Error generating response: {e}"
+
 def gradio_interface(video_url, model_choice):
     """
     gradio interface function to process the video URL and model choice.
@@ -235,17 +251,23 @@ def gradio_interface(video_url, model_choice):
     
     # Display the summary in real-time and collect all yielded values
     # choose to call get_openai_response or get_anthopic_claude_response based on the variable
-    if model_choice == "Ollama":
-        # for fragment in get_ollama_response("llama3.2:latest", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
+    if model_choice == "DeepSeek":
+        for fragment in get_deepseek_response("deepseek-chat", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
+            summary += fragment
+            yield transcript_text, summary, None, None  # Update the summary_output in real-time
+      
+    elif model_choice == "Claude":
+        # for fragment in get_anthopic_claude_response("claude-3-5-sonnet-20240620", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
+        for fragment in get_anthopic_claude_response("claude-3-7-sonnet-20250219", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
+            summary += fragment
+            yield transcript_text, summary, None, None  # Update the summary_output in real-time
+    elif model_choice == "Ollama":
         for fragment in get_ollama_response("cognitivetech/obook_summary:q4_k_m", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
             summary += fragment
             yield transcript_text, summary, None, None  # Update the summary_output in real-time
-    elif model_choice == "Claude":
-        for fragment in get_anthopic_claude_response("claude-3-5-sonnet-20240620", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
-            summary += fragment
-            yield transcript_text, summary, None, None  # Update the summary_output in real-time
     elif model_choice == "OpenAI":
-        for fragment in get_openai_response("gpt-4o-mini", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
+        # for fragment in get_openai_response("gpt-4o-mini", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
+        for fragment in get_openai_response("gpt-4o", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
             summary += fragment
             yield transcript_text, summary, None, None  # Update the summary_output in real-time
     
@@ -264,7 +286,7 @@ def main():
         with gr.Row():
             video_url_input = gr.Textbox(label="YouTube Video URL", placeholder="Enter YouTube video URL here...")
             model_dropdown = gr.Dropdown(
-                choices=["Ollama", "Claude", "OpenAI"], label="Model", value="Ollama"
+                choices=["DeepSeek", "Claude", "Ollama", "OpenAI",], label="Model", value="DeepSeek"
             )
         
         with gr.Row():
