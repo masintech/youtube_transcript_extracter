@@ -246,28 +246,39 @@ def gradio_interface(video_url, model_choice):
     metadata = get_video_metadata(video_id)
     transcript_text = get_youtube_transcript(video_id)
     
-    user_message = f"Summarize the following transcript:\n\n{transcript_text}"
-    summary = f"Summary of the video '{metadata['title']}':\n\n"
+    # user_message = f"Summarize the following transcript:\n\n{transcript_text}"
+    system_message = "You are an assistant that analyzes the contents of text files \
+and provides an accurate summary, ignoring text that might be irrelevant."
+    user_message = f"Rewrite and organize the text. And also keep content in details:\n\n{transcript_text}"
+    summary = f"Rewrite of the video '{metadata['title']}':\n\n"
     
     # Display the summary in real-time and collect all yielded values
     # choose to call get_openai_response or get_anthopic_claude_response based on the variable
     if model_choice == "DeepSeek":
-        for fragment in get_deepseek_response("deepseek-chat", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
+        # for fragment in get_deepseek_response("deepseek-chat", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
+        #     summary += fragment
+        #     yield transcript_text, summary, None, None  # Update the summary_output in real-time
+        for fragment in get_deepseek_response("deepseek-chat", user_message, system_message):
             summary += fragment
             yield transcript_text, summary, None, None  # Update the summary_output in real-time
-      
+        # twitter_post = f"DeepSeek Summary: {summary}"
+        # for fragment in get_deepseek_response("deepseek-chat", summary, system_message="You are a helpful assistant that generate viral tweets."):
+        #     print(fragment, end='', flush=True)
+        #     twitter_post += fragment
+        #     yield None, twitter_post, None, None  # Update the summary_output in real-time
+
     elif model_choice == "Claude":
         # for fragment in get_anthopic_claude_response("claude-3-5-sonnet-20240620", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
-        for fragment in get_anthopic_claude_response("claude-3-7-sonnet-20250219", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
+        for fragment in get_anthopic_claude_response("claude-3-7-sonnet-20250219", user_message, system_message):
             summary += fragment
             yield transcript_text, summary, None, None  # Update the summary_output in real-time
     elif model_choice == "Ollama":
-        for fragment in get_ollama_response("cognitivetech/obook_summary:q4_k_m", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
+        for fragment in get_ollama_response("cognitivetech/obook_summary:q4_k_m", user_message, system_message):
             summary += fragment
             yield transcript_text, summary, None, None  # Update the summary_output in real-time
     elif model_choice == "OpenAI":
         # for fragment in get_openai_response("gpt-4o-mini", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
-        for fragment in get_openai_response("gpt-4o", user_message, system_message="You are a helpful assistant that summarizes transcripts."):
+        for fragment in get_openai_response("gpt-4o", user_message, system_message):
             summary += fragment
             yield transcript_text, summary, None, None  # Update the summary_output in real-time
     
