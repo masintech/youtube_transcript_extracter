@@ -5,6 +5,7 @@ import argparse
 import os
 import re
 import sys
+import pyperclip
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -116,6 +117,11 @@ def main():
         metavar="LANG",
         help="Preferred transcript language(s) in order of priority (e.g. --lang fr en)"
     )
+    parser.add_argument(
+        "-c", "--copy",
+        action="store_true",
+        help="Copy transcript to clipboard"
+    )
     args = parser.parse_args()
 
     save_to_file = args.save or args.out is not None
@@ -125,7 +131,12 @@ def main():
             output_file = process_video(args.url, languages=args.lang, output_file=args.out)
             print(f"Transcript saved to {output_file}", file=sys.stderr)
         else:
-            print(get_transcript(args.url, languages=args.lang))
+            transcript = get_transcript(args.url, languages=args.lang)
+            if args.copy:
+                pyperclip.copy(transcript)
+                print("Transcript copied to clipboard.", file=sys.stderr)
+            else:
+                print(transcript)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
