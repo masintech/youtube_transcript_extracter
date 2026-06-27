@@ -1,6 +1,7 @@
 from youtube_transcript_api import YouTubeTranscriptApi
 from googleapiclient.discovery import build
 from urllib.parse import urlparse, parse_qs
+import argparse
 import os
 import re
 import sys
@@ -22,32 +23,35 @@ def extract_video_id(video_url):
 
 
 def get_video_metadata(video_id):
+    print("Fetching metadata...", file=sys.stderr)
     youtube = build('youtube', 'v3', developerKey=os.getenv('GOOGLE_API_KEY'))
     request = youtube.videos().list(part="snippet,statistics", id=video_id)
     response = request.execute()
 
     if "items" in response and len(response["items"]) > 0:
         video_data = response["items"][0]
-        metadata = {
+        return {
             "title": video_data["snippet"]["title"],
             "channel": video_data["snippet"]["channelTitle"],
             "description": video_data["snippet"]["description"],
             "publish_date": video_data["snippet"]["publishedAt"],
             "view_count": video_data["statistics"]["viewCount"]
         }
-        return metadata
-    else:
-        return {
-            "title": "Unknown",
-            "channel": "Unknown",
-            "description": "Unknown",
-            "publish_date": "Unknown",
-            "view_count": "Unknown"
-        }
+    return {
+        "title": "Unknown",
+        "channel": "Unknown",
+        "description": "Unknown",
+        "publish_date": "Unknown",
+        "view_count": "Unknown"
+    }
 
-def get_youtube_transcript(video_id):
-    transcript = YouTubeTranscriptApi.get_transcript(video_id)
+
+def get_youtube_transcript(video_id, languages=None):
+    print("Downloading transcript...", file=sys.stderr)
+    kwargs = {"languages": languages} if languages else {}
+    transcript = YouTubeTranscriptApi.get_transcript(video_id, **kwargs)
     return "\n".join([entry["text"] for entry in transcript])
+
 
 def save_transcript_as_markdown(transcript, metadata, output_file="transcript.md"):
     with open(output_file, "w") as md_file:
@@ -63,46 +67,69 @@ def save_transcript_as_markdown(transcript, metadata, output_file="transcript.md
         md_file.write(transcript)
     return output_file
 
+
 def _safe_filename(title):
     return re.sub(r'[^\w\s-]', '', title).strip() or "transcript"
 
-def process_video(video_url):
+
+def process_video(video_url, languages=None, output_file=None):
     video_id = extract_video_id(video_url)
     metadata = get_video_metadata(video_id)
-    transcript_text = get_youtube_transcript(video_id)
-    output_file = f"{_safe_filename(metadata['title'])}.md"
+    transcript_text = get_youtube_transcript(video_id, languages)
+    if output_file is None:
+        output_file = f"{_safe_filename(metadata['title'])}.md"
     save_transcript_as_markdown(transcript_text, metadata, output_file)
     return output_file
 
 
-def get_transcript(video_url):
+def get_transcript(video_url, languages=None):
     video_id = extract_video_id(video_url)
-    return get_youtube_transcript(video_id)
+    return get_youtube_transcript(video_id, languages)
 
-
-# CLI entry point
-def print_usage():
-    print("Usage:")
-    print("  python YoutubeTranscriptionExtrator.py {URL}         # Print transcript to terminal")
-    print("  python YoutubeTranscriptionExtrator.py {URL} -l      # Output transcript to file {title}.md")
 
 def main():
-    if len(sys.argv) < 2:
-        print_usage()
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Extract transcripts from YouTube videos.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  %(prog)s https://youtube.com/watch?v=ID\n"
+            "  %(prog)s https://youtu.be/ID -l\n"
+            "  %(prog)s https://youtu.be/ID -l --out my_notes.md\n"
+            "  %(prog)s https://youtu.be/ID --lang fr es\n"
+        )
+    )
+    parser.add_argument("url", help="YouTube video URL")
+    parser.add_argument(
+        "-l", "--save",
+        action="store_true",
+        help="Save transcript to a Markdown file instead of printing"
+    )
+    parser.add_argument(
+        "--out",
+        metavar="FILE",
+        help="Output file path (implies -l, default: <video title>.md)"
+    )
+    parser.add_argument(
+        "--lang",
+        nargs="+",
+        metavar="LANG",
+        help="Preferred transcript language(s) in order of priority (e.g. --lang fr en)"
+    )
+    args = parser.parse_args()
 
-    video_url = sys.argv[1]
-    output_to_file = len(sys.argv) > 2 and sys.argv[2] == "-l"
+    save_to_file = args.save or args.out is not None
 
     try:
-        if output_to_file:
-            output_file = process_video(video_url)
-            print(f"Transcript saved to {output_file}")
+        if save_to_file:
+            output_file = process_video(args.url, languages=args.lang, output_file=args.out)
+            print(f"Transcript saved to {output_file}", file=sys.stderr)
         else:
-            print(get_transcript(video_url))
+            print(get_transcript(args.url, languages=args.lang))
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
