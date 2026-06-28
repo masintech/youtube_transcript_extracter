@@ -1,51 +1,114 @@
-# youtube_transcript_extracter
+# YouTube Transcript Extractor & Summarizer
 
-## Overview
-This project extracts YouTube video transcripts, summarizes them using various AI models, and saves the results in Markdown files.
+Two scripts for pulling YouTube transcripts and generating AI summaries:
 
-## Setup Instructions
+- **`YoutubeTranscriptionExtrator.py`** — CLI tool: extract and save transcripts from the command line.
+- **`YoutubeTranscriptSummarizer.py`** — Gradio web app: extract transcripts and generate AI-powered summaries.
 
-### 1. Clone the Repository
-```bash
-git clone <repository-url>
-cd youtube_transcript_extracter
-```
+---
 
-### 2. Install Dependencies
-Make sure you have Python installed. Then, install the required Python packages:
+## Setup
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Set Up API Keys
-Create a `.env` file in the project directory and add the following keys:
-```
+Create a `.env` file in the project root:
+
+```env
+GOOGLE_API_KEY=your_google_api_key
 OPENAI_API_KEY=your_openai_api_key
 ANTHROPIC_API_KEY=your_anthropic_api_key
 DEEPSEEK_API_KEY=your_deepseek_api_key
-GOOGLE_API_KEY=your_google_api_key
 ```
 
-Replace `your_openai_api_key`, `your_anthropic_api_key`, `your_deepseek_api_key`, and `your_google_api_key` with your actual API keys.
+| Key | Required for |
+|-----|-------------|
+| `GOOGLE_API_KEY` | Video metadata (title, channel, view count) |
+| `OPENAI_API_KEY` | OpenAI model in the Gradio app |
+| `ANTHROPIC_API_KEY` | Claude model in the Gradio app |
+| `DEEPSEEK_API_KEY` | DeepSeek model in the Gradio app |
 
-### 4. Pull Required Ollama Model
-If you plan to use the Ollama model, ensure the Ollama server is running and pull the required model:
+The CLI extractor only needs `GOOGLE_API_KEY` (when saving with metadata).
+
+---
+
+## CLI — `YoutubeTranscriptionExtrator.py`
+
+### Usage
+
+```
+python YoutubeTranscriptionExtrator.py <url> [options]
+```
+
+| Flag | Description |
+|------|-------------|
+| `-l`, `--save` | Save transcript to a Markdown file (default: print to stdout) |
+| `--out FILE` | Output file path (implies `-l`; default: `<video title>.md`) |
+| `--lang LANG [LANG ...]` | Preferred transcript language(s) in priority order |
+| `-c`, `--copy` | Copy transcript to clipboard instead of printing |
+
+### Examples
+
 ```bash
-ollama pull cognitivetech/obook_summary:q4_k_m
+# Print transcript to stdout
+python YoutubeTranscriptionExtrator.py https://www.youtube.com/watch?v=dQw4w9WgXcQ
+
+# Save to a Markdown file (auto-named from video title)
+python YoutubeTranscriptionExtrator.py https://youtu.be/dQw4w9WgXcQ -l
+
+# Save to a specific file
+python YoutubeTranscriptionExtrator.py https://youtu.be/dQw4w9WgXcQ --out notes.md
+
+# Prefer French transcript, fall back to English
+python YoutubeTranscriptionExtrator.py https://youtu.be/dQw4w9WgXcQ --lang fr en
+
+# Copy transcript directly to clipboard
+python YoutubeTranscriptionExtrator.py https://youtu.be/dQw4w9WgXcQ -c
 ```
 
-### 5. Run the Application
-Launch the Gradio interface:
+Supported URL formats: `youtube.com/watch?v=ID`, `youtu.be/ID`, `youtube.com/shorts/ID`.
+
+---
+
+## Gradio App — `YoutubeTranscriptSummarizer.py`
+
+### Launch
+
 ```bash
 python YoutubeTranscriptSummarizer.py
 ```
 
-## Usage
-1. Enter the YouTube video URL in the input box.
-2. Select the AI model for summarization (DeepSeek, Claude, Ollama, or OpenAI).
-3. Click "Generate Transcript and Summary" to process the video.
-4. Download the transcript and summary files if needed.
+Opens a local web UI at `http://127.0.0.1:7860`.
 
-## Notes
-- Ensure all API keys are valid and have sufficient quota.
-- The Ollama server must be running locally for the Ollama model to work. Use the command `ollama serve` to start the server.
+### How to use
+
+1. Paste a YouTube URL into the input box.
+2. Select a model from the dropdown.
+3. Click **Generate Transcript and Summary**.
+4. The transcript and AI-generated summary stream in side by side.
+5. Download the resulting `.md` files via the download buttons.
+
+### Available models
+
+| Model | Provider | Notes |
+|-------|----------|-------|
+| DeepSeek | DeepSeek API | Default |
+| Claude | Anthropic | `claude-sonnet-4-6` |
+| OpenAI | OpenAI | `gpt-4o` |
+| Ollama | Local | Requires `ollama serve` running locally |
+
+---
+
+## Example workflow
+
+```bash
+# Quick clipboard copy to paste into another tool
+python YoutubeTranscriptionExtrator.py https://youtu.be/dQw4w9WgXcQ -c
+
+# Save a French transcript for a non-English video
+python YoutubeTranscriptionExtrator.py https://youtu.be/VIDEO_ID --lang fr --out transcript_fr.md
+
+# Launch the web app for AI summarization
+python YoutubeTranscriptSummarizer.py
+```
