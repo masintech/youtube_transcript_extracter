@@ -110,7 +110,7 @@ def gradio_interface(video_url, model_choice):
             summary += fragment
             yield transcript_text, summary, None, None
     elif model_choice == "Claude":
-        for fragment in get_anthropic_claude_response("claude-opus-4-8", user_message, system_message):
+        for fragment in get_anthropic_claude_response("claude-sonnet-4-6", user_message, system_message):
             summary += fragment
             yield transcript_text, summary, None, None
     elif model_choice == "Ollama":

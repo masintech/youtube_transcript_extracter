@@ -94,7 +94,7 @@ Opens a local web UI at `http://127.0.0.1:7860`.
 | Model | Provider | Notes |
 |-------|----------|-------|
 | DeepSeek | DeepSeek API | Default |
-| Claude | Anthropic | `claude-opus-4-8` |
+| Claude | Anthropic | `claude-sonnet-4-6` |
 | OpenAI | OpenAI | `gpt-4o` |
 | Ollama | Local | Requires `ollama serve` running locally |
 
