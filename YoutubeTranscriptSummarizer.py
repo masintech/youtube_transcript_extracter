@@ -4,6 +4,8 @@ import openai
 import anthropic
 from dotenv import load_dotenv
 
+from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound, VideoUnavailable
+
 from YoutubeTranscriptionExtrator import (
     extract_video_id,
     get_video_metadata,
@@ -93,10 +95,27 @@ def get_deepseek_response(model, user_message, system_message=None):
         yield f"Error generating response: {e}"
 
 
-def gradio_interface(video_url, model_choice):
+LANGUAGE_CONFIG = {
+    "English": {"codes": ["en"],           "instruction": "Write your summary in English."},
+    "Chinese": {"codes": ["zh-Hant", "zh"], "instruction": "Write your summary in Traditional Chinese (繁體中文)."},
+}
+
+
+def gradio_interface(video_url, model_choice, language_choice):
     video_id = extract_video_id(video_url)
     metadata = get_video_metadata(video_id)
-    transcript_text = get_youtube_transcript(video_id)
+    lang_cfg = LANGUAGE_CONFIG[language_choice]
+    try:
+        transcript_text = get_youtube_transcript(video_id, languages=lang_cfg["codes"])
+    except TranscriptsDisabled:
+        yield "⚠️ Subtitles are disabled for this video.", "", None, None
+        return
+    except NoTranscriptFound:
+        yield f"⚠️ No {language_choice} transcript found for this video.", "", None, None
+        return
+    except VideoUnavailable:
+        yield "⚠️ This video is unavailable.", "", None, None
+        return
 
     system_message = (
         "You are an expert at distilling educational content from video transcripts. "
@@ -105,6 +124,7 @@ def gradio_interface(video_url, model_choice):
         "Ignore filler words, tangential remarks, and repetition."
     )
     user_message = (
+        f"{lang_cfg['instruction']}\n\n"
         "Analyze the following YouTube transcript and produce a structured summary that captures its educational essence.\n\n"
         "Use this structure:\n\n"
         "**Core Thesis** (1-2 sentences): What is the central argument or lesson?\n\n"
@@ -161,6 +181,11 @@ def main():
                 label="Model",
                 value="DeepSeek",
             )
+            language_dropdown = gr.Dropdown(
+                choices=["English", "Chinese"],
+                label="Transcript Language",
+                value="English",
+            )
 
         with gr.Row():
             transcript_output = gr.Markdown(label="Transcript")
@@ -174,7 +199,7 @@ def main():
 
         submit_button.click(
             gradio_interface,
-            inputs=[video_url_input, model_dropdown],
+            inputs=[video_url_input, model_dropdown, language_dropdown],
             outputs=[transcript_output, summary_output, download_transcript_button, download_summary_button],
         )
 
