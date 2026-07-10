@@ -99,14 +99,29 @@ def gradio_interface(video_url, model_choice):
     transcript_text = get_youtube_transcript(video_id)
 
     system_message = (
-        "You are an assistant that analyzes the contents of text files "
-        "and provides an accurate summary, ignoring text that might be irrelevant."
+        "You are an expert at distilling educational content from video transcripts. "
+        "Your goal is to capture the essence of what is being taught with precision and fidelity — "
+        "preserving the speaker's key ideas, frameworks, and insights without adding, inventing, or embellishing. "
+        "Ignore filler words, tangential remarks, and repetition."
     )
-    user_message = f"Rewrite and organize the text. And also keep content in details:\n\n{transcript_text}"
+    user_message = (
+        "Analyze the following YouTube transcript and produce a structured summary that captures its educational essence.\n\n"
+        "Use this structure:\n\n"
+        "**Core Thesis** (1-2 sentences): What is the central argument or lesson?\n\n"
+        "**Key Concepts & Frameworks**: List and briefly explain the main ideas, models, or frameworks introduced.\n\n"
+        "**Supporting Evidence & Examples**: Note specific examples, data, stories, or demonstrations used to illustrate the concepts.\n\n"
+        "**Actionable Takeaways**: What should the reader understand or be able to do after watching?\n\n"
+        "**Notable Quotes** (optional): Include any particularly precise or memorable phrasings from the speaker.\n\n"
+        "Rules:\n"
+        "- Stay faithful to what was actually said — do not introduce outside knowledge or opinions\n"
+        "- Preserve technical terms and domain-specific language exactly as used\n"
+        "- If something was unclear in the transcript, reflect that uncertainty rather than guessing\n\n"
+        f"Transcript:\n\n{transcript_text}"
+    )
     summary = f"Rewrite of the video '{metadata['title']}':\n\n"
 
     if model_choice == "DeepSeek":
-        for fragment in get_deepseek_response("deepseek-chat", user_message, system_message):
+        for fragment in get_deepseek_response("deepseek-v4-flash", user_message, system_message):
             summary += fragment
             yield transcript_text, summary, None, None
     elif model_choice == "Claude":
