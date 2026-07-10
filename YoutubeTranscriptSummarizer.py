@@ -95,6 +95,65 @@ def get_deepseek_response(model, user_message, system_message=None):
         yield f"Error generating response: {e}"
 
 
+def stream_chat(model_choice, messages, system_message=None):
+    """Stream a multi-turn chat response. messages: list of {role, content} dicts."""
+    try:
+        if model_choice == "DeepSeek":
+            api_messages = ([{"role": "system", "content": system_message}] if system_message else []) + messages
+            client = openai.OpenAI(base_url='https://api.deepseek.com', api_key=os.environ['DEEPSEEK_API_KEY'])
+            stream = client.chat.completions.create(model="deepseek-v4-flash", messages=api_messages, stream=True)
+            for chunk in stream:
+                yield chunk.choices[0].delta.content or ""
+        elif model_choice == "Claude":
+            claude = anthropic.Anthropic()
+            kwargs = dict(model="claude-sonnet-4-6", max_tokens=1024, messages=messages)
+            if system_message:
+                kwargs["system"] = system_message
+            with claude.messages.stream(**kwargs) as stream:
+                for text in stream.text_stream:
+                    yield text
+        elif model_choice == "OpenAI":
+            api_messages = ([{"role": "system", "content": system_message}] if system_message else []) + messages
+            stream = openai.chat.completions.create(model="gpt-4o", messages=api_messages, stream=True)
+            for chunk in stream:
+                yield chunk.choices[0].delta.content or ""
+        elif model_choice == "Ollama":
+            api_messages = ([{"role": "system", "content": system_message}] if system_message else []) + messages
+            client = openai.OpenAI(base_url='http://localhost:11434/v1', api_key='ollama')
+            stream = client.chat.completions.create(model="cognitivetech/obook_summary:q4_k_m", messages=api_messages, stream=True)
+            for chunk in stream:
+                yield chunk.choices[0].delta.content or ""
+    except Exception as e:
+        yield f"Error: {e}"
+
+
+def chat_respond(user_message, history, transcript_text, model_choice):
+    if not user_message.strip():
+        yield history, ""
+        return
+    if not transcript_text:
+        yield history + [
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": "⚠️ Please generate a transcript first before asking questions."},
+        ], ""
+        return
+
+    system_message = (
+        "You are a helpful assistant answering follow-up questions about a YouTube video. "
+        "Answer concisely based only on the transcript provided. "
+        "If the answer is not in the transcript, say so clearly.\n\n"
+        f"Transcript:\n\n{transcript_text}"
+    )
+    messages = list(history) + [{"role": "user", "content": user_message}]
+    new_history = list(history) + [
+        {"role": "user", "content": user_message},
+        {"role": "assistant", "content": ""},
+    ]
+    for fragment in stream_chat(model_choice, messages, system_message):
+        new_history[-1]["content"] += fragment
+        yield new_history, ""
+
+
 LANGUAGE_CONFIG = {
     "English": {"codes": ["en"],           "instruction": "Write your summary in English."},
     "Chinese": {"codes": ["zh-Hant", "zh"], "instruction": "Write your summary in Traditional Chinese (繁體中文)."},
@@ -108,13 +167,13 @@ def gradio_interface(video_url, model_choice, language_choice):
     try:
         transcript_text = get_youtube_transcript(video_id, languages=lang_cfg["codes"])
     except TranscriptsDisabled:
-        yield "⚠️ Subtitles are disabled for this video.", "", None, None
+        yield "⚠️ Subtitles are disabled for this video.", "", None, None, ""
         return
     except NoTranscriptFound:
-        yield f"⚠️ No {language_choice} transcript found for this video.", "", None, None
+        yield f"⚠️ No {language_choice} transcript found for this video.", "", None, None, ""
         return
     except VideoUnavailable:
-        yield "⚠️ This video is unavailable.", "", None, None
+        yield "⚠️ This video is unavailable.", "", None, None, ""
         return
 
     system_message = (
@@ -143,19 +202,19 @@ def gradio_interface(video_url, model_choice, language_choice):
     if model_choice == "DeepSeek":
         for fragment in get_deepseek_response("deepseek-v4-flash", user_message, system_message):
             summary += fragment
-            yield transcript_text, summary, None, None
+            yield transcript_text, summary, None, None, transcript_text
     elif model_choice == "Claude":
         for fragment in get_anthropic_claude_response("claude-sonnet-4-6", user_message, system_message):
             summary += fragment
-            yield transcript_text, summary, None, None
+            yield transcript_text, summary, None, None, transcript_text
     elif model_choice == "Ollama":
         for fragment in get_ollama_response("cognitivetech/obook_summary:q4_k_m", user_message, system_message):
             summary += fragment
-            yield transcript_text, summary, None, None
+            yield transcript_text, summary, None, None, transcript_text
     elif model_choice == "OpenAI":
         for fragment in get_openai_response("gpt-4o", user_message, system_message):
             summary += fragment
-            yield transcript_text, summary, None, None
+            yield transcript_text, summary, None, None, transcript_text
 
     safe_title = _safe_filename(metadata['title'])
     transcript_file = f"{safe_title}_transcript.md"
@@ -164,11 +223,12 @@ def gradio_interface(video_url, model_choice, language_choice):
     with open(summary_file, "w") as f:
         f.write(summary)
 
-    yield transcript_text, summary, transcript_file, summary_file
+    yield transcript_text, summary, transcript_file, summary_file, transcript_text
 
 
 READING_CSS = """
-#summary-output .prose, #transcript-output .prose {
+#summary-output .prose, #transcript-output .prose,
+#chat-panel .prose {
     font-family: Georgia, 'Times New Roman', serif !important;
     font-size: 17px !important;
     line-height: 1.8 !important;
@@ -176,18 +236,21 @@ READING_CSS = """
     letter-spacing: 0.01em !important;
 }
 #summary-output .prose p, #transcript-output .prose p,
-#summary-output .prose li, #transcript-output .prose li {
+#summary-output .prose li, #transcript-output .prose li,
+#chat-panel .prose p, #chat-panel .prose li {
     font-family: Georgia, 'Times New Roman', serif !important;
     font-size: 17px !important;
     line-height: 1.8 !important;
     margin-bottom: 0.75em !important;
 }
 #summary-output .prose h1, #summary-output .prose h2, #summary-output .prose h3,
-#transcript-output .prose h1, #transcript-output .prose h2, #transcript-output .prose h3 {
+#transcript-output .prose h1, #transcript-output .prose h2, #transcript-output .prose h3,
+#chat-panel .prose h1, #chat-panel .prose h2, #chat-panel .prose h3 {
     font-family: Georgia, 'Times New Roman', serif !important;
     letter-spacing: -0.01em !important;
 }
-#summary-output .prose strong, #transcript-output .prose strong {
+#summary-output .prose strong, #transcript-output .prose strong,
+#chat-panel .prose strong {
     font-weight: 700 !important;
     color: #111 !important;
 }
@@ -240,11 +303,35 @@ def main():
                 )
                 download_transcript_button = gr.File(label="Download Transcript")
 
+        transcript_state = gr.State("")
+
         submit_button.click(
             gradio_interface,
             inputs=[video_url_input, model_dropdown, language_dropdown],
-            outputs=[transcript_output, summary_output, download_transcript_button, download_summary_button],
+            outputs=[transcript_output, summary_output, download_transcript_button, download_summary_button, transcript_state],
         )
+
+        gr.Markdown("---")
+        with gr.Accordion("Ask a follow-up question", open=False):
+            chatbot = gr.Chatbot(type="messages", height=350, show_label=False, elem_id="chat-panel")
+            with gr.Row():
+                chat_input = gr.Textbox(
+                    placeholder="Ask anything about the video...",
+                    show_label=False,
+                    scale=5,
+                )
+                chat_button = gr.Button("Ask", scale=1, variant="secondary")
+
+            chat_button.click(
+                chat_respond,
+                inputs=[chat_input, chatbot, transcript_state, model_dropdown],
+                outputs=[chatbot, chat_input],
+            )
+            chat_input.submit(
+                chat_respond,
+                inputs=[chat_input, chatbot, transcript_state, model_dropdown],
+                outputs=[chatbot, chat_input],
+            )
 
     demo.launch()
 
