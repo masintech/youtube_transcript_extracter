@@ -167,35 +167,78 @@ def gradio_interface(video_url, model_choice, language_choice):
     yield transcript_text, summary, transcript_file, summary_file
 
 
+READING_CSS = """
+#summary-output .prose, #transcript-output .prose {
+    font-family: Georgia, 'Times New Roman', serif !important;
+    font-size: 17px !important;
+    line-height: 1.8 !important;
+    color: #1a1a1a !important;
+    letter-spacing: 0.01em !important;
+}
+#summary-output .prose p, #transcript-output .prose p,
+#summary-output .prose li, #transcript-output .prose li {
+    font-family: Georgia, 'Times New Roman', serif !important;
+    font-size: 17px !important;
+    line-height: 1.8 !important;
+    margin-bottom: 0.75em !important;
+}
+#summary-output .prose h1, #summary-output .prose h2, #summary-output .prose h3,
+#transcript-output .prose h1, #transcript-output .prose h2, #transcript-output .prose h3 {
+    font-family: Georgia, 'Times New Roman', serif !important;
+    letter-spacing: -0.01em !important;
+}
+#summary-output .prose strong, #transcript-output .prose strong {
+    font-weight: 700 !important;
+    color: #111 !important;
+}
+"""
+
+
 def main():
-    with gr.Blocks() as demo:
+    with gr.Blocks(theme=gr.themes.Soft(), title="YouTube Transcript Extractor", css=READING_CSS) as demo:
         gr.Markdown("# YouTube Transcript Extractor")
+        gr.Markdown("Extract and summarize YouTube videos using AI — paste a URL, pick a model and language, and go.")
 
-        with gr.Row():
-            video_url_input = gr.Textbox(
-                label="YouTube Video URL",
-                placeholder="Enter YouTube video URL here...",
-            )
-            model_dropdown = gr.Dropdown(
-                choices=["DeepSeek", "Claude", "Ollama", "OpenAI"],
-                label="Model",
-                value="DeepSeek",
-            )
-            language_dropdown = gr.Dropdown(
-                choices=["English", "Chinese"],
-                label="Transcript Language",
-                value="English",
-            )
+        with gr.Row(equal_height=True):
+            with gr.Column(scale=4):
+                video_url_input = gr.Textbox(
+                    label="YouTube Video URL",
+                    placeholder="https://www.youtube.com/watch?v=...",
+                    show_label=True,
+                )
+            with gr.Column(scale=1):
+                model_dropdown = gr.Dropdown(
+                    choices=["DeepSeek", "Claude", "Ollama", "OpenAI"],
+                    label="Model",
+                    value="DeepSeek",
+                )
+            with gr.Column(scale=1):
+                language_dropdown = gr.Dropdown(
+                    choices=["English", "Chinese"],
+                    label="Language",
+                    value="English",
+                )
 
-        with gr.Row():
-            transcript_output = gr.Markdown(label="Transcript")
-            summary_output = gr.Markdown(label="Summary")
+        submit_button = gr.Button("Generate Transcript & Summary", variant="primary", size="lg")
 
-        with gr.Row():
-            download_transcript_button = gr.File(label="Download Transcript")
-            download_summary_button = gr.File(label="Download Summary")
+        with gr.Tabs():
+            with gr.Tab("Summary"):
+                summary_output = gr.Markdown(
+                    label="Summary",
+                    height=520,
+                    show_label=False,
+                    elem_id="summary-output",
+                )
+                download_summary_button = gr.File(label="Download Summary")
 
-        submit_button = gr.Button("Generate Transcript and Summary")
+            with gr.Tab("Transcript"):
+                transcript_output = gr.Markdown(
+                    label="Transcript",
+                    height=520,
+                    show_label=False,
+                    elem_id="transcript-output",
+                )
+                download_transcript_button = gr.File(label="Download Transcript")
 
         submit_button.click(
             gradio_interface,
