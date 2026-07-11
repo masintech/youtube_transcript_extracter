@@ -132,22 +132,32 @@ def format_metadata_card(metadata):
     return card
 
 
-def chat_respond(user_message, history, transcript_text, model_choice):
+def chat_respond(user_message, history, transcript_text, model_choice, free_mode, language_choice):
     if not user_message.strip():
         yield history, ""
         return
-    if not transcript_text:
-        yield history + [
-            {"role": "user", "content": user_message},
-            {"role": "assistant", "content": "⚠️ Please generate a transcript first before asking questions."},
-        ], ""
-        return
-    system_message = (
-        "You are a helpful assistant answering follow-up questions about a YouTube video. "
-        "Answer concisely based only on the transcript provided. "
-        "If the answer is not in the transcript, say so clearly.\n\n"
-        f"Transcript:\n\n{transcript_text}"
-    )
+    lang_instruction = LANGUAGE_CONFIG[language_choice]["instruction"]
+    if free_mode:
+        system_message = (
+            f"{lang_instruction}\n\n"
+            "You are a helpful assistant. Answer the user's questions thoroughly and freely."
+        )
+        if transcript_text:
+            system_message += f"\n\nFor reference, here is the video transcript:\n\n{transcript_text}"
+    else:
+        if not transcript_text:
+            yield history + [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": "⚠️ Please generate a transcript first before asking questions."},
+            ], ""
+            return
+        system_message = (
+            f"{lang_instruction}\n\n"
+            "You are a helpful assistant answering follow-up questions about a YouTube video. "
+            "Answer concisely based only on the transcript provided. "
+            "If the answer is not in the transcript, say so clearly.\n\n"
+            f"Transcript:\n\n{transcript_text}"
+        )
     messages = list(history) + [{"role": "user", "content": user_message}]
     new_history = list(history) + [
         {"role": "user", "content": user_message},
@@ -222,6 +232,11 @@ def reset_all():
         gr.update(value="", visible=False),
         gr.update(open=False),
         [],
+        gr.update(value="", visible=False),
+        None,
+        gr.update(value=""),
+        gr.update(value=""),
+        gr.update(visible=False, open=False),
     )
 
 
@@ -229,6 +244,7 @@ ZETTELKASTEN_OUTPUT_ROOTS = [
     "/Users/lorenzo/Documents/Youtube Transcript/Source Note",
     "/Users/lorenzo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Lorenzo/2  - Source Material/Video",
 ]
+OBSIDIAN_TAGS_FOLDER = "/Users/lorenzo/Library/Mobile Documents/iCloud~md~obsidian/Documents/Lorenzo/3 - Tags"
 
 _ZK_STOPWORDS = {
     'the','a','an','and','of','in','to','for','with','on','at','from','by','is',
@@ -243,6 +259,33 @@ def _derive_keyword(title):
     words = re.sub(r'[^\w\s]', ' ', title.lower()).split()
     significant = [w for w in words if w not in _ZK_STOPWORDS and w.isalpha()][:4]
     return '-'.join(significant) if significant else 'video'
+
+
+def _extract_connections(ref_note_body):
+    """Return unique [[wikilink]] targets from the ## Connections section."""
+    match = re.search(r'## Connections\s*\n+(.*?)(?:\n---|\Z)', ref_note_body, re.DOTALL)
+    if not match:
+        return []
+    return list(dict.fromkeys(re.findall(r'\[\[([^\]|#\n]+?)(?:\|[^\]])?\]\]', match.group(1))))
+
+
+def _create_tag_stubs(ref_notes):
+    """Create stub notes in OBSIDIAN_TAGS_FOLDER for new connections. Returns list of created names."""
+    seen = set()
+    created = []
+    os.makedirs(OBSIDIAN_TAGS_FOLDER, exist_ok=True)
+    for _, body in ref_notes:
+        for name in _extract_connections(body):
+            name = name.strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            tag_path = os.path.join(OBSIDIAN_TAGS_FOLDER, f"{name}.md")
+            if not os.path.exists(tag_path):
+                with open(tag_path, "w", encoding="utf-8") as f:
+                    f.write(f"---\ntype: tag\n---\n\n# {name}\n")
+                created.append(name)
+    return created
 
 
 def build_zettelkasten_source_prompt(transcript_text, metadata, video_url, lang_cfg):
@@ -378,11 +421,20 @@ def preview_zettelkasten_notes(transcript_text, video_url, model_choice, languag
     for fragment in stream_response(model_choice, [{"role": "user", "content": user_msg2}], sys_msg2):
         refs_raw += fragment
 
+    def _clean_note(text):
+        text = text.strip()
+        text = re.sub(r'^```\w*\n', '', text)   # strip opening code fence
+        text = re.sub(r'\n```\s*$', '', text)   # strip closing code fence
+        text = re.sub(r'^===+\s*\n+', '', text) # strip stray === delimiter lines
+        return text.strip()
+
+    source_note = _clean_note(source_note)
+
     ref_blocks = re.split(r'===REF:\s*(.+?)===', refs_raw)
     ref_notes = []
     for i in range(1, len(ref_blocks) - 1, 2):
         title = ref_blocks[i].strip()
-        body = ref_blocks[i + 1].strip()
+        body = _clean_note(ref_blocks[i + 1])
         ref_notes.append((title, body))
 
     see_also_links = "\n".join(f"- [[ref - {t}]]" for t, _ in ref_notes)
@@ -424,14 +476,22 @@ def save_zettelkasten_notes(zk_data):
     except Exception as e:
         return gr.update(value=f"⚠️ Error saving files: {e}", visible=True)
 
+    created_tags = _create_tag_stubs(ref_notes)
+
     ref_list = "\n".join(f"  - `ref - {t}.md`" for t, _ in ref_notes)
     paths_list = "\n".join(f"- `{p}`" for p in saved_paths)
+    tags_section = (
+        f"\n\n**Tag stubs created ({len(created_tags)}):** "
+        + ", ".join(f"`{t}`" for t in created_tags)
+        if created_tags else ""
+    )
     return gr.update(
         value=(
             f"✅ **Saved** ({len(ref_notes)} reference notes)\n\n"
             f"**Folders:**\n{paths_list}\n\n"
             f"**Source Note:** `{keyword_date}.md`\n\n"
             f"**Reference Notes:**\n{ref_list}"
+            f"{tags_section}"
         ),
         visible=True,
     )
@@ -555,6 +615,7 @@ def main():
                     scale=5,
                 )
                 chat_button = gr.Button("Ask", scale=1, variant="secondary")
+            free_mode_toggle = gr.Checkbox(label="Answer freely (not limited to transcript)", value=False)
 
         gen_outputs = [
             transcript_output, summary_output,
@@ -568,7 +629,7 @@ def main():
             inputs=[video_url_input, model_dropdown, language_dropdown],
             outputs=gen_outputs,
         )
-        reset_button.click(reset_all, outputs=gen_outputs + [chatbot])
+        reset_button.click(reset_all, outputs=gen_outputs + [chatbot, zettelkasten_status, zk_state, zk_source_preview, zk_refs_preview, zk_preview_accordion])
         regenerate_button.click(
             regenerate_summary,
             inputs=[transcript_state, model_dropdown, language_dropdown, title_state],
@@ -588,12 +649,12 @@ def main():
         )
         chat_button.click(
             chat_respond,
-            inputs=[chat_input, chatbot, transcript_state, model_dropdown],
+            inputs=[chat_input, chatbot, transcript_state, model_dropdown, free_mode_toggle, language_dropdown],
             outputs=[chatbot, chat_input],
         )
         chat_input.submit(
             chat_respond,
-            inputs=[chat_input, chatbot, transcript_state, model_dropdown],
+            inputs=[chat_input, chatbot, transcript_state, model_dropdown, free_mode_toggle, language_dropdown],
             outputs=[chatbot, chat_input],
         )
         zettelkasten_btn.click(
