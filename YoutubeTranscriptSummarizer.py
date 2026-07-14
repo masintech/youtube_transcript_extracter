@@ -35,6 +35,15 @@ def _format_timestamped_transcript(entries, video_id):
     return "\n".join(lines)
 
 
+def _normalize_mode(mode):
+    """Coerce legacy boolean lecture_mode values to the new string format."""
+    if mode is True:
+        return "Lecture"
+    if not mode or mode not in ("General", "Lecture", "Technical"):
+        return "General"
+    return mode
+
+
 def _depth_instruction(transcript_text):
     """Return a length-scaled depth rule to prevent over-compression."""
     word_count = len(transcript_text.split())
@@ -225,6 +234,7 @@ def build_technical_summary_prompt(lang_cfg, transcript_text, use_timestamps=Fal
 
 def _stream_summary(transcript_text, model_choice, language_choice, note_mode="General", timestamped_transcript=None):
     """Yields incrementally accumulated summary string."""
+    note_mode = _normalize_mode(note_mode)
     lang_cfg = LANGUAGE_CONFIG[language_choice]
     effective = timestamped_transcript if timestamped_transcript else transcript_text
     use_ts = bool(timestamped_transcript)
@@ -296,6 +306,7 @@ def chat_respond(user_message, history, transcript_text, model_choice, free_mode
 
 
 def gradio_interface(video_url, model_choice, language_choice, note_mode="General"):
+    note_mode = _normalize_mode(note_mode)
     lang_cfg = LANGUAGE_CONFIG[language_choice]
     video_id = extract_video_id(video_url)
     metadata = get_video_metadata(video_id)
@@ -343,6 +354,7 @@ def gradio_interface(video_url, model_choice, language_choice, note_mode="Genera
 
 
 def regenerate_summary(transcript_text, model_choice, language_choice, safe_title, note_mode="General", timestamped_transcript=None):
+    note_mode = _normalize_mode(note_mode)
     if not transcript_text:
         yield "⚠️ No transcript loaded. Please generate a transcript first.", None, ""
         return
@@ -479,26 +491,40 @@ def build_zettelkasten_source_prompt(transcript_text, metadata, video_url, lang_
     return system_message, user_message
 
 
-def build_zettelkasten_refs_prompt(source_note_text, keyword_date, lang_cfg):
+def build_zettelkasten_refs_prompt(source_note_text, keyword_date, lang_cfg, transcript_text=None):
+    depth = _depth_instruction(transcript_text) if transcript_text else ""
     system_message = (
-        "You are a faithful Zettelkasten note-taker. "
-        "Distill self-contained ideas from a source into Reference Notes. "
-        "Each note captures one idea exactly as the speaker presented it — not your synthesis. "
-        "Generate as many or as few notes as the content warrants — do not pad thin content or truncate rich content."
+        "You are a faithful Zettelkasten note-taker extracting Reference Notes from a video. "
+        "A Reference Note is a self-contained note about ONE specific concept, technique, or argument — "
+        "something with its own name and identity that could exist independently of this source. "
+        "It is NOT a re-summary of the source, and it is NOT a sub-section of the source note. "
+        "A reader should be able to read a Reference Note without having read the source note and still understand the idea."
     )
     lang_note = f"\n\n{lang_cfg['instruction']}" if lang_cfg.get('instruction') else ""
+    transcript_section = f"\n\nRAW TRANSCRIPT (use this for depth and detail in Key Points):\n\n{transcript_text}" if transcript_text else ""
     user_message = (
-        f"Based on the Source Note below, identify the key ideas worth capturing as Reference Notes.{lang_note}\n\n"
+        f"Identify concepts from this video that deserve their own Reference Notes, then write each one.{lang_note}\n\n"
+        f"{depth}"
+        "SELECTION CRITERIA — a good Reference Note candidate:\n"
+        "- Has its own name or identity (a framework, technique, concept, argument, phenomenon, or tool)\n"
+        "- Is specific enough to be distinct — not just the main topic of the video restated\n"
+        "- Could connect to notes on other topics in a personal knowledge base\n"
+        "- Is not already fully captured by the source note's Summary section\n\n"
+        "ANTI-PATTERNS — do NOT create a Reference Note that:\n"
+        "- Is just the video's main topic with a different title\n"
+        "- Restates the source note's Summary in bullet form\n"
+        "- Duplicates another reference note from the same batch\n"
+        "- Is too broad to have a focused title (e.g. 'AI Overview', 'Key Ideas')\n\n"
         "CONTENT RULES:\n"
-        "- Generate only as many notes as the content genuinely supports — if the source is thin on distinct ideas, 1 or 0 notes is fine; if dense, generate more\n"
-        "- Each note must be a self-contained, titled idea — not a summary fragment\n"
-        "- Key Points: 3–8 tight bullets capturing the idea as presented; no dense prose paragraphs\n"
-        "- Connections: link to 2–4 related concepts using [[wikilinks]]\n"
-        "- Questions: 1–2 things you'd need to verify or follow up on\n\n"
+        "- Generate only as many notes as the content genuinely supports — 0 is acceptable if no distinct sub-concepts exist\n"
+        "- Key Points: write 4–8 substantive bullets. Each bullet should be a full, informative sentence — not a phrase. "
+        "Draw from the raw transcript for detail; do not compress to vague one-liners\n"
+        "- Connections: 2–4 [[wikilinks]] to related concepts beyond this video\n"
+        "- Questions: 1–2 things worth verifying or following up on\n\n"
         "OUTPUT RULES:\n"
         "- Output each note one after another with no extra text between them\n"
         "- Each note must start with its own frontmatter block (---)\n"
-        "- Titles: concise (3–6 words), capturing the core idea\n\n"
+        "- Titles: 3–6 words, name the concept precisely\n\n"
         "REFERENCE NOTE TEMPLATE (repeat for each note):\n"
         "```\n"
         f"---\n"
@@ -507,12 +533,13 @@ def build_zettelkasten_refs_prompt(source_note_text, keyword_date, lang_cfg):
         f"type: reference\n"
         f"source: [[{keyword_date}]]\n"
         f"---\n\n"
-        "# Concise Idea Title\n\n"
+        "# Concise Concept Title\n\n"
         "## Key Points\n\n"
-        "- Core claim or definition\n"
-        "- Key mechanism, argument, or evidence\n"
-        "- Important nuance or caveat\n"
-        "- Implication or consequence\n\n"
+        "- Full sentence stating the core claim or definition\n"
+        "- Full sentence explaining the mechanism or how it works\n"
+        "- Full sentence on the key evidence or argument the speaker gave\n"
+        "- Full sentence on an important nuance, caveat, or qualification\n"
+        "- Full sentence on the implication or consequence\n\n"
         "---\n\n"
         "## Connections\n\n"
         "[[related topic]] [[related topic]]\n\n"
@@ -523,7 +550,8 @@ def build_zettelkasten_refs_prompt(source_note_text, keyword_date, lang_cfg):
         "## Source\n\n"
         f"- [[{keyword_date}]]\n"
         "```\n\n"
-        f"SOURCE NOTE:\n\n{source_note_text}"
+        f"SOURCE NOTE (for context on what is already captured):\n\n{source_note_text}"
+        f"{transcript_section}"
     )
     return system_message, user_message
 
@@ -674,6 +702,7 @@ def build_zettelkasten_technical_prompt(transcript_text, metadata, video_url, la
 
 def preview_zettelkasten_notes(transcript_text, video_url, model_choice, language_choice, note_mode="General"):
     """Generator yielding (status, source_preview, refs_preview, accordion, zk_state, zk_keyword_input)."""
+    note_mode = _normalize_mode(note_mode)
     _nc = gr.update()
     _hidden = gr.update(visible=False, open=False)
 
@@ -726,7 +755,7 @@ def preview_zettelkasten_notes(transcript_text, video_url, model_choice, languag
         source_note = _clean_note(source_note)
 
         yield gr.update(value="⏳ Generating reference notes…", visible=True), _nc, _nc, _hidden, None, _nc
-        sys_msg2, user_msg2 = build_zettelkasten_refs_prompt(source_note, keyword_date, lang_cfg)
+        sys_msg2, user_msg2 = build_zettelkasten_refs_prompt(source_note, keyword_date, lang_cfg, transcript_text=transcript_text)
         refs_raw = ""
         for fragment in stream_response(model_choice, [{"role": "user", "content": user_msg2}], sys_msg2):
             refs_raw += fragment
