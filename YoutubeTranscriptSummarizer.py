@@ -6,6 +6,7 @@ import anthropic
 from datetime import date
 from dotenv import load_dotenv
 
+from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound, VideoUnavailable
 
 from YoutubeTranscriptionExtrator import (
@@ -22,6 +23,27 @@ os.environ['ANTHROPIC_API_KEY'] = os.getenv('ANTHROPIC_API_KEY', 'your-key-if-no
 os.environ['DEEPSEEK_API_KEY'] = os.getenv('DEEPSEEK_API_KEY', 'your-key-if-not-using-env')
 
 API_TIMEOUT = 120
+
+
+def _format_timestamped_transcript(entries, video_id):
+    """Format transcript entries with clickable [M:SS](url) timestamps."""
+    lines = []
+    for entry in entries:
+        start = int(entry['start'])
+        m, s = divmod(start, 60)
+        url = f"https://youtu.be/{video_id}?t={start}"
+        lines.append(f"[{m}:{s:02d}]({url}) {entry['text']}")
+    return "\n".join(lines)
+
+
+def _strip_frontmatter(text):
+    """Remove YAML frontmatter block for display (keep original for saving)."""
+    if text.startswith('---'):
+        end = text.find('\n---\n', 3)
+        if end != -1:
+            return text[end + 5:].lstrip('\n')
+    return text
+
 
 LANGUAGE_CONFIG = {
     "English": {
@@ -78,15 +100,21 @@ def stream_response(model_choice, messages, system_message=None):
         yield f"⚠️ Error ({model_choice}): {e}"
 
 
-def build_summary_prompt(lang_cfg, transcript_text):
+def build_summary_prompt(lang_cfg, transcript_text, use_timestamps=False):
     system_message = (
         "You are an expert at distilling educational content from video transcripts. "
         "Your goal is to capture the essence of what is being taught with precision and fidelity — "
         "preserving the speaker's key ideas, frameworks, and insights without adding, inventing, or embellishing. "
         "Ignore filler words, tangential remarks, and repetition."
     )
+    ts_note = (
+        "The transcript includes [M:SS](url) timestamp links. "
+        "For each Key Concept and Takeaway, include the timestamp link from the nearest relevant line.\n\n"
+        if use_timestamps else ""
+    )
     user_message = (
         f"{lang_cfg['instruction']}\n\n"
+        f"{ts_note}"
         "Analyze the following YouTube transcript and produce a structured summary that captures its educational essence.\n\n"
         "Use this structure:\n\n"
         "**Core Thesis** (1-2 sentences): What is the central argument or lesson?\n\n"
@@ -103,10 +131,46 @@ def build_summary_prompt(lang_cfg, transcript_text):
     return system_message, user_message
 
 
-def _stream_summary(transcript_text, model_choice, language_choice):
+def build_lecture_summary_prompt(lang_cfg, transcript_text, use_timestamps=False):
+    system_message = (
+        "You are an expert tutor summarising a lecture for a student. "
+        "Your goal is to help the student understand and retain the material — not merely archive it. "
+        "Explain concepts clearly, as if the student is encountering them for the first time."
+    )
+    ts_note = (
+        "The transcript includes [M:SS](url) timestamp links. "
+        "For each Core Concept and Takeaway, include the timestamp link from the nearest relevant line.\n\n"
+        if use_timestamps else ""
+    )
+    user_message = (
+        f"{lang_cfg['instruction']}\n\n"
+        f"{ts_note}"
+        "Summarise this YouTube lecture for a student who wants to learn from it.\n\n"
+        "Use this structure:\n\n"
+        "**What You'll Learn** (3–5 bullet objectives): What concrete things will the student be able to understand or do?\n\n"
+        "**Core Concepts Explained**: For each major concept, define it clearly, explain the mechanism, and state why it matters. Write for a student encountering it for the first time.\n\n"
+        "**Key Examples & Illustrations**: Break down the most important examples used. Explain what each one demonstrates.\n\n"
+        "**Frameworks & Models**: Any mental models or structured approaches introduced — described so they can be applied.\n\n"
+        "**Takeaways**: The 3–5 most important things to remember from this lecture.\n\n"
+        "**Quick Self-Test** (optional): 2–3 questions a student can use to check their understanding.\n\n"
+        "Rules:\n"
+        "- Prioritise clarity and understanding over brevity\n"
+        "- Preserve technical terms exactly as used — then explain them\n"
+        "- Stay faithful to what was taught; do not add outside knowledge\n\n"
+        f"Transcript:\n\n{transcript_text}"
+    )
+    return system_message, user_message
+
+
+def _stream_summary(transcript_text, model_choice, language_choice, lecture_mode=False, timestamped_transcript=None):
     """Yields incrementally accumulated summary string."""
     lang_cfg = LANGUAGE_CONFIG[language_choice]
-    system_message, user_message = build_summary_prompt(lang_cfg, transcript_text)
+    effective = timestamped_transcript if timestamped_transcript else transcript_text
+    use_ts = bool(timestamped_transcript)
+    if lecture_mode:
+        system_message, user_message = build_lecture_summary_prompt(lang_cfg, effective, use_timestamps=use_ts)
+    else:
+        system_message, user_message = build_summary_prompt(lang_cfg, effective, use_timestamps=use_ts)
     summary = ""
     for fragment in stream_response(model_choice, [{"role": "user", "content": user_message}], system_message):
         summary += fragment
@@ -168,33 +232,36 @@ def chat_respond(user_message, history, transcript_text, model_choice, free_mode
         yield new_history, ""
 
 
-def gradio_interface(video_url, model_choice, language_choice):
+def gradio_interface(video_url, model_choice, language_choice, lecture_mode=False):
     lang_cfg = LANGUAGE_CONFIG[language_choice]
     video_id = extract_video_id(video_url)
     metadata = get_video_metadata(video_id)
 
     try:
-        transcript_text = get_youtube_transcript(video_id, languages=lang_cfg["codes"])
+        entries = YouTubeTranscriptApi.get_transcript(video_id, languages=lang_cfg["codes"])
     except TranscriptsDisabled:
-        yield "⚠️ Subtitles are disabled for this video.", "", None, None, "", "", "", gr.update(visible=False), gr.update(open=False)
+        yield "⚠️ Subtitles are disabled for this video.", "", None, None, "", "", "", gr.update(visible=False), gr.update(open=False), ""
         return
     except NoTranscriptFound:
-        yield f"⚠️ No {language_choice} transcript found for this video.", "", None, None, "", "", "", gr.update(visible=False), gr.update(open=False)
+        yield f"⚠️ No {language_choice} transcript found for this video.", "", None, None, "", "", "", gr.update(visible=False), gr.update(open=False), ""
         return
     except VideoUnavailable:
-        yield "⚠️ This video is unavailable.", "", None, None, "", "", "", gr.update(visible=False), gr.update(open=False)
+        yield "⚠️ This video is unavailable.", "", None, None, "", "", "", gr.update(visible=False), gr.update(open=False), ""
         return
 
+    transcript_text = "\n".join(e['text'] for e in entries)
+    timestamped_text = _format_timestamped_transcript(entries, video_id)
     metadata_card = format_metadata_card(metadata)
     safe_title = _safe_filename(metadata['title'])
     summary = ""
 
-    for summary in _stream_summary(transcript_text, model_choice, language_choice):
+    for summary in _stream_summary(transcript_text, model_choice, language_choice, lecture_mode, timestamped_text):
         yield (
             transcript_text, summary, None, None,
             transcript_text, summary, safe_title,
             gr.update(value=metadata_card, visible=True),
             gr.update(open=True),
+            timestamped_text,
         )
 
     transcript_file = f"{safe_title}_transcript.md"
@@ -208,15 +275,16 @@ def gradio_interface(video_url, model_choice, language_choice):
         transcript_text, summary, safe_title,
         gr.update(value=metadata_card, visible=True),
         gr.update(open=True),
+        timestamped_text,
     )
 
 
-def regenerate_summary(transcript_text, model_choice, language_choice, safe_title):
+def regenerate_summary(transcript_text, model_choice, language_choice, safe_title, lecture_mode=False, timestamped_transcript=None):
     if not transcript_text:
         yield "⚠️ No transcript loaded. Please generate a transcript first.", None, ""
         return
     summary = ""
-    for summary in _stream_summary(transcript_text, model_choice, language_choice):
+    for summary in _stream_summary(transcript_text, model_choice, language_choice, lecture_mode, timestamped_transcript):
         yield summary, None, summary
 
     filename = f"{safe_title}_summary.md" if safe_title else "summary.md"
@@ -231,12 +299,14 @@ def reset_all():
         "", "", "",
         gr.update(value="", visible=False),
         gr.update(open=False),
+        "",
         [],
         gr.update(value="", visible=False),
         None,
         gr.update(value=""),
         gr.update(value=""),
         gr.update(visible=False, open=False),
+        gr.update(value="", visible=False),
     )
 
 
@@ -297,15 +367,20 @@ def build_zettelkasten_source_prompt(transcript_text, metadata, video_url, lang_
 
     system_message = (
         "You are a faithful Zettelkasten note-taker. "
-        "Your job is to capture the source material precisely using the provided template. "
-        "Do not add outside knowledge, opinions, or interpretations beyond what the speaker said. "
+        "Capture what the source actually says — do not add outside knowledge, opinions, or interpretations. "
         "Preserve technical terms exactly. Mark speculative or unverified claims with [speculation]."
     )
     lang_note = f"\n\n{lang_cfg['instruction']}" if lang_cfg.get('instruction') else ""
     user_message = (
-        f"Create a Source Note for this YouTube video using EXACTLY the template below. "
-        f"Fill in every section with content from the transcript.{lang_note}\n\n"
-        "TEMPLATE:\n"
+        f"Write a Source Note for this YouTube video.{lang_note}\n\n"
+        "CONTENT RULES:\n"
+        "- Summary: 2–3 sentences capturing what this source is fundamentally about\n"
+        "- Key Points: Use H3 sections for clear thematic segments; otherwise tight bullet points. Capture every significant claim, argument, or insight — this is the preservation layer\n"
+        "- Notable Quotes: Include only if the speaker said something unusually precise or memorable; use sparingly\n"
+        "- Critical Framing: 2–4 sentences on what deserves scrutiny before promoting ideas to a Main Note\n"
+        "- Links: Choose 3–6 relevant [[wikilinks]] based on the actual content\n"
+        "- See Also: Leave empty — will be filled after reference notes are created\n\n"
+        "TEMPLATE (structure only — write rich content following the rules above):\n"
         "```\n"
         f"---\n"
         f"date: {today}\n"
@@ -321,21 +396,19 @@ def build_zettelkasten_source_prompt(transcript_text, metadata, video_url, lang_
         f"**Links:** [[topic]] [[topic]]\n\n"
         "---\n\n"
         "## Summary\n\n"
-        "2–3 sentences capturing what this source is fundamentally about.\n\n"
+        "\n\n"
         "---\n\n"
         "## Key Points\n\n"
-        "Use H3 sections if the video has clear segments. Otherwise use bullet points.\n"
-        "Mark speculative claims with [speculation].\n\n"
+        "\n\n"
         "---\n\n"
         "## Notable Quotes\n\n"
-        "> \"Exact quote\" — Speaker\n\n"
-        "(Use sparingly — only for precise or unusually quotable statements.)\n\n"
+        "\n\n"
         "---\n\n"
         "## Critical Framing\n\n"
-        "Brief note on what deserves scrutiny or needs verification before promoting to a Main Note.\n\n"
+        "\n\n"
         "---\n\n"
         "## See Also\n\n"
-        "(Leave this section empty — reference notes will be listed here separately.)\n"
+        "\n"
         "```\n\n"
         f"TRANSCRIPT:\n\n{transcript_text}"
     )
@@ -345,18 +418,22 @@ def build_zettelkasten_source_prompt(transcript_text, metadata, video_url, lang_
 def build_zettelkasten_refs_prompt(source_note_text, keyword_date, lang_cfg):
     system_message = (
         "You are a faithful Zettelkasten note-taker. "
-        "Your job is to distill 2–5 self-contained ideas from a source into Reference Notes. "
-        "Each note captures one idea exactly as the speaker presented it — not your synthesis."
+        "Distill self-contained ideas from a source into Reference Notes. "
+        "Each note captures one idea exactly as the speaker presented it — not your synthesis or outside knowledge."
     )
     lang_note = f"\n\n{lang_cfg['instruction']}" if lang_cfg.get('instruction') else ""
     user_message = (
-        f"Based on the Source Note below, identify 2–5 ideas worth capturing as Reference Notes.{lang_note}\n\n"
-        "RULES:\n"
-        "- Start each reference note with this exact delimiter on its own line: ===REF: <Concise Idea Title>===\n"
-        "- Follow each delimiter immediately with the note content using the template below\n"
-        "- Titles should be concise (3–6 words), capturing the core idea\n"
-        "- Do not add any text between notes except the delimiter line\n\n"
-        "REFERENCE NOTE TEMPLATE (repeat for each note):\n"
+        f"Based on the Source Note below, generate Reference Notes for ideas worth capturing.{lang_note}\n\n"
+        "CONTENT RULES:\n"
+        "- Decide organically how many notes to write: one note per genuinely distinct, self-contained idea. If all ideas reduce to one central point or the source is thin, write one note or none. Never force notes.\n"
+        "- Key Points: 3–8 tight bullets — each scannable at a glance, capturing the idea as the speaker presented it\n"
+        "- Connections: 2–5 specific [[wikilinks]] to related topics or concepts in the vault\n"
+        "- Questions: 1–3 pointed questions raised by this specific idea — make them concrete, not generic\n"
+        "- Titles: 3–6 words, concrete and specific (e.g. 'Attention Mechanism in Transformers', not 'Key Concept')\n\n"
+        "OUTPUT RULES:\n"
+        "- Output notes one after another with no extra text between them\n"
+        "- Each note must start with its own frontmatter block (---) immediately\n\n"
+        "TEMPLATE (repeat for each note — write rich content following the rules above):\n"
         "```\n"
         f"---\n"
         f"date: {date.today().isoformat()}\n"
@@ -364,20 +441,17 @@ def build_zettelkasten_refs_prompt(source_note_text, keyword_date, lang_cfg):
         f"type: reference\n"
         f"source: [[{keyword_date}]]\n"
         f"---\n\n"
-        "# <Concise Idea Title>\n\n"
+        "# Concise Idea Title\n\n"
         "## Key Points\n\n"
-        "- <Core claim or definition>\n"
-        "- <Key mechanism, argument, or evidence>\n"
-        "- <Important nuance or caveat>\n"
-        "- <Implication or consequence>\n"
-        "- <Additional point if relevant>\n\n"
+        "- \n"
+        "- \n"
+        "- \n\n"
         "---\n\n"
         "## Connections\n\n"
-        "[[related topic]] [[related topic]]\n\n"
+        "[[topic]] [[topic]]\n\n"
         "---\n\n"
         "## Questions\n\n"
-        "- What would I need to verify this?\n"
-        "- Which existing notes does this connect to?\n\n"
+        "- \n\n"
         "---\n\n"
         "## Source\n\n"
         f"- [[{keyword_date}]]\n"
@@ -387,87 +461,168 @@ def build_zettelkasten_refs_prompt(source_note_text, keyword_date, lang_cfg):
     return system_message, user_message
 
 
-def preview_zettelkasten_notes(transcript_text, video_url, model_choice, language_choice):
-    """Generator yielding (status, source_preview, refs_preview, accordion, zk_state)."""
+def build_zettelkasten_lecture_prompt(transcript_text, metadata, video_url, lang_cfg):
+    title = metadata.get('title', 'Unknown')
+    channel = metadata.get('channel', 'Unknown')
+    today = date.today().isoformat()
+
+    system_message = (
+        "You are an expert tutor writing lecture notes for a student. "
+        "Your goal is to help the student understand and retain the material — not merely archive it. "
+        "Prioritise depth and clarity over brevity. Write as if explaining to a diligent student encountering these ideas for the first time."
+    )
+    lang_note = f"\n\n{lang_cfg['instruction']}" if lang_cfg.get('instruction') else ""
+    user_message = (
+        f"Write lecture notes for a student learning from this video.{lang_note}\n\n"
+        "CONTENT RULES:\n"
+        "- Prioritise clarity and understanding over brevity — a longer explanation a student can follow is better than a short one they can't\n"
+        "- Core Concepts: define each term, explain the mechanism, and state why it matters — write as if the student is encountering it for the first time\n"
+        "- Key Examples: explain what each example demonstrates and why it was chosen by the speaker\n"
+        "- Preserve technical terms exactly as used — then explain them in plain language\n"
+        "- Stay faithful to what was taught; do not add outside knowledge\n\n"
+        "The template below defines the structure. Apply the rules above to produce rich, educational content in each section.\n\n"
+        "TEMPLATE:\n"
+        "```\n"
+        f"---\n"
+        f"date: {today}\n"
+        f"type: lecture\n"
+        f"source-url: {video_url}\n"
+        f"speaker: {channel}\n"
+        f"---\n\n"
+        f"# {title} — Lecture Notes\n\n"
+        f"**Source:** {channel} · {video_url}\n"
+        f"**Date:** {today}\n\n"
+        "---\n\n"
+        "## Learning Objectives\n\n"
+        "By the end of this lecture, you should be able to:\n"
+        "- \n\n"
+        "---\n\n"
+        "## Core Concepts\n\n"
+        "### Concept Name\n"
+        "Full explanation here — define, explain mechanism, state why it matters.\n\n"
+        "---\n\n"
+        "## Key Examples & Illustrations\n\n"
+        "### Example Name\n"
+        "What was demonstrated, why this example was used, what it helps the student understand.\n\n"
+        "---\n\n"
+        "## Frameworks & Models\n\n"
+        "Mental models or structured approaches introduced — described clearly enough that a student can apply them.\n\n"
+        "---\n\n"
+        "## Study Questions\n\n"
+        "1. \n"
+        "2. \n"
+        "3. \n\n"
+        "---\n\n"
+        "## Summary\n\n"
+        "3–5 sentences synthesising what was taught and why it matters.\n\n"
+        "---\n\n"
+        "## See Also\n\n"
+        "[[topic]] [[topic]]\n"
+        "```\n\n"
+        f"TRANSCRIPT:\n\n{transcript_text}"
+    )
+    return system_message, user_message
+
+
+def preview_zettelkasten_notes(transcript_text, video_url, model_choice, language_choice, lecture_mode=False):
+    """Generator yielding (status, source_preview, refs_preview, accordion, zk_state, zk_keyword_input)."""
     _nc = gr.update()
     _hidden = gr.update(visible=False, open=False)
 
     if not transcript_text:
-        yield gr.update(value="⚠️ No transcript loaded. Generate a transcript first.", visible=True), _nc, _nc, _hidden, None
+        yield gr.update(value="⚠️ No transcript loaded. Generate a transcript first.", visible=True), _nc, _nc, _hidden, None, _nc
         return
 
     lang_cfg = LANGUAGE_CONFIG[language_choice]
-    yield gr.update(value="⏳ Fetching video metadata…", visible=True), _nc, _nc, _hidden, None
+    yield gr.update(value="⏳ Fetching video metadata…", visible=True), _nc, _nc, _hidden, None, _nc
 
     try:
         video_id = extract_video_id(video_url)
         metadata = get_video_metadata(video_id)
     except Exception as e:
-        yield gr.update(value=f"⚠️ Could not fetch metadata: {e}", visible=True), _nc, _nc, _hidden, None
+        yield gr.update(value=f"⚠️ Could not fetch metadata: {e}", visible=True), _nc, _nc, _hidden, None, _nc
         return
 
     keyword = _derive_keyword(metadata.get('title', 'video'))
     keyword_date = f"{keyword} {date.today().isoformat()}"
 
-    yield gr.update(value=f"⏳ Generating source note for **{keyword_date}**…", visible=True), _nc, _nc, _hidden, None
-    sys_msg, user_msg = build_zettelkasten_source_prompt(transcript_text, metadata, video_url, lang_cfg)
-    source_note = ""
-    for fragment in stream_response(model_choice, [{"role": "user", "content": user_msg}], sys_msg):
-        source_note += fragment
-
-    yield gr.update(value="⏳ Generating reference notes…", visible=True), _nc, _nc, _hidden, None
-    sys_msg2, user_msg2 = build_zettelkasten_refs_prompt(source_note, keyword_date, lang_cfg)
-    refs_raw = ""
-    for fragment in stream_response(model_choice, [{"role": "user", "content": user_msg2}], sys_msg2):
-        refs_raw += fragment
-
     def _clean_note(text):
         text = text.strip()
-        text = re.sub(r'^```\w*\n', '', text)   # strip opening code fence
-        text = re.sub(r'\n```\s*$', '', text)   # strip closing code fence
-        text = re.sub(r'^===+\s*\n+', '', text) # strip stray === delimiter lines
+        text = re.sub(r'^```\w*\n', '', text)
+        text = re.sub(r'\n```\s*$', '', text)
+        text = re.sub(r'^===+\s*\n+', '', text)
         return text.strip()
 
-    source_note = _clean_note(source_note)
+    if lecture_mode:
+        yield gr.update(value=f"⏳ Generating lecture note for **{keyword_date}**…", visible=True), _nc, _nc, _hidden, None, _nc
+        sys_msg, user_msg = build_zettelkasten_lecture_prompt(transcript_text, metadata, video_url, lang_cfg)
+        lecture_note = ""
+        for fragment in stream_response(model_choice, [{"role": "user", "content": user_msg}], sys_msg):
+            lecture_note += fragment
+        lecture_note = _clean_note(lecture_note)
+        final_source = lecture_note
+        ref_notes = []
+        refs_display = "*Study questions are included in the lecture note above.*"
+    else:
+        yield gr.update(value=f"⏳ Generating source note for **{keyword_date}**…", visible=True), _nc, _nc, _hidden, None, _nc
+        sys_msg, user_msg = build_zettelkasten_source_prompt(transcript_text, metadata, video_url, lang_cfg)
+        source_note = ""
+        for fragment in stream_response(model_choice, [{"role": "user", "content": user_msg}], sys_msg):
+            source_note += fragment
+        source_note = _clean_note(source_note)
 
-    ref_blocks = re.split(r'===REF:\s*(.+?)===', refs_raw)
-    ref_notes = []
-    for i in range(1, len(ref_blocks) - 1, 2):
-        title = ref_blocks[i].strip()
-        body = _clean_note(ref_blocks[i + 1])
-        ref_notes.append((title, body))
+        yield gr.update(value="⏳ Generating reference notes…", visible=True), _nc, _nc, _hidden, None, _nc
+        sys_msg2, user_msg2 = build_zettelkasten_refs_prompt(source_note, keyword_date, lang_cfg)
+        refs_raw = ""
+        for fragment in stream_response(model_choice, [{"role": "user", "content": user_msg2}], sys_msg2):
+            refs_raw += fragment
 
-    see_also_links = "\n".join(f"- [[ref - {t}]]" for t, _ in ref_notes)
-    final_source = source_note.replace(
-        "## See Also\n\n(Leave this section empty — reference notes will be listed here separately.)",
-        f"## See Also\n\n{see_also_links}",
-    )
+        ref_parts = re.split(r'(?m)(?=^---\ndate:)', refs_raw.strip())
+        ref_notes = []
+        for part in ref_parts:
+            part = _clean_note(part)
+            if not part.startswith('---'):
+                continue
+            title_match = re.search(r'^# (.+)$', part, re.MULTILINE)
+            if title_match:
+                title = title_match.group(1).strip()
+                ref_notes.append((title, part))
 
-    refs_preview = "\n\n---\n\n".join(body for _, body in ref_notes)
+        see_also_links = "\n".join(f"- [[ref - {t}]]" for t, _ in ref_notes)
+        if see_also_links and '## See Also' in source_note:
+            parts = source_note.split('## See Also', 1)
+            final_source = parts[0] + f"## See Also\n\n{see_also_links}\n"
+        else:
+            final_source = source_note
+        refs_display = "\n\n---\n\n".join(_strip_frontmatter(body) for _, body in ref_notes) if ref_notes else ""
 
+    mode_label = "lecture note" if lecture_mode else f"{len(ref_notes)} reference notes"
     yield (
-        gr.update(value=f"✅ Preview ready ({len(ref_notes)} reference notes) — review below, then click **Save to Zettelkasten**.", visible=True),
-        gr.update(value=final_source),
-        gr.update(value=refs_preview),
+        gr.update(value=f"✅ Preview ready ({mode_label}) — review below, then click **Save to Zettelkasten**.", visible=True),
+        gr.update(value=_strip_frontmatter(final_source)),
+        gr.update(value=refs_display),
         gr.update(visible=True, open=True),
-        {"keyword_date": keyword_date, "source_note": final_source, "ref_notes": ref_notes},
+        {"keyword_date": keyword_date, "source_note": final_source, "ref_notes": ref_notes, "lecture_mode": lecture_mode},
+        gr.update(value=keyword_date, visible=True),
     )
 
 
-def save_zettelkasten_notes(zk_data):
+def save_zettelkasten_notes(zk_data, custom_keyword=None):
     if not zk_data:
         return gr.update(value="⚠️ No preview to save. Click Preview first.", visible=True)
 
-    keyword_date = zk_data["keyword_date"]
+    keyword_date = custom_keyword.strip() if custom_keyword and custom_keyword.strip() else zk_data["keyword_date"]
     source_note = zk_data["source_note"]
     ref_notes = zk_data["ref_notes"]
+    lecture_mode = zk_data.get("lecture_mode", False)
+    main_filename = f"{keyword_date} (lecture).md" if lecture_mode else f"{keyword_date}.md"
 
     saved_paths = []
     try:
         for root in ZETTELKASTEN_OUTPUT_ROOTS:
             folder = os.path.join(root, keyword_date)
             os.makedirs(folder, exist_ok=True)
-            with open(os.path.join(folder, f"{keyword_date}.md"), "w", encoding="utf-8") as f:
+            with open(os.path.join(folder, main_filename), "w", encoding="utf-8") as f:
                 f.write(source_note)
             for title, body in ref_notes:
                 with open(os.path.join(folder, f"ref - {title}.md"), "w", encoding="utf-8") as f:
@@ -478,23 +633,29 @@ def save_zettelkasten_notes(zk_data):
 
     created_tags = _create_tag_stubs(ref_notes)
 
-    ref_list = "\n".join(f"  - `ref - {t}.md`" for t, _ in ref_notes)
     paths_list = "\n".join(f"- `{p}`" for p in saved_paths)
     tags_section = (
         f"\n\n**Tag stubs created ({len(created_tags)}):** "
         + ", ".join(f"`{t}`" for t in created_tags)
         if created_tags else ""
     )
-    return gr.update(
-        value=(
+    if lecture_mode:
+        summary = (
+            f"✅ **Lecture note saved**\n\n"
+            f"**Folders:**\n{paths_list}\n\n"
+            f"**Lecture Note:** `{main_filename}`"
+            f"{tags_section}"
+        )
+    else:
+        ref_list = "\n".join(f"  - `ref - {t}.md`" for t, _ in ref_notes)
+        summary = (
             f"✅ **Saved** ({len(ref_notes)} reference notes)\n\n"
             f"**Folders:**\n{paths_list}\n\n"
-            f"**Source Note:** `{keyword_date}.md`\n\n"
+            f"**Source Note:** `{main_filename}`\n\n"
             f"**Reference Notes:**\n{ref_list}"
             f"{tags_section}"
-        ),
-        visible=True,
-    )
+        )
+    return gr.update(value=summary, visible=True)
 
 
 READING_CSS = """
@@ -537,6 +698,23 @@ READING_CSS = """
     border-radius: 4px;
     margin-top: 8px;
 }
+#zk-source-preview .prose, #zk-refs-preview .prose {
+    font-family: Georgia, 'Times New Roman', serif !important;
+    font-size: 16px !important;
+    line-height: 1.75 !important;
+    color: #1a1a1a !important;
+}
+#zk-source-preview .prose p, #zk-refs-preview .prose p,
+#zk-source-preview .prose li, #zk-refs-preview .prose li {
+    font-family: Georgia, 'Times New Roman', serif !important;
+    font-size: 16px !important;
+    line-height: 1.75 !important;
+    margin-bottom: 0.6em !important;
+}
+#zk-source-preview .prose h1, #zk-source-preview .prose h2, #zk-source-preview .prose h3,
+#zk-refs-preview .prose h1, #zk-refs-preview .prose h2, #zk-refs-preview .prose h3 {
+    font-family: Georgia, 'Times New Roman', serif !important;
+}
 """
 
 
@@ -548,6 +726,7 @@ def main():
         transcript_state = gr.State("")
         summary_state = gr.State("")
         title_state = gr.State("")
+        timestamped_state = gr.State("")
 
         with gr.Row(equal_height=True):
             with gr.Column(scale=4):
@@ -570,6 +749,7 @@ def main():
 
         with gr.Row():
             submit_button = gr.Button("Generate Transcript & Summary", variant="primary", size="lg", scale=4)
+            lecture_mode_toggle = gr.Checkbox(label="🎓 Lecture Mode", value=False, scale=1)
             reset_button = gr.Button("Reset", variant="secondary", size="lg", scale=1)
 
         metadata_output = gr.Markdown(visible=False, elem_id="metadata-card")
@@ -599,11 +779,12 @@ def main():
         with gr.Accordion("Zettelkasten Preview", open=True, visible=False) as zk_preview_accordion:
             with gr.Tabs():
                 with gr.Tab("Source Note"):
-                    zk_source_preview = gr.Markdown(height=420, show_label=False)
+                    zk_source_preview = gr.Markdown(height=420, show_label=False, elem_id="zk-source-preview")
                 with gr.Tab("Reference Notes"):
-                    zk_refs_preview = gr.Markdown(height=420, show_label=False)
+                    zk_refs_preview = gr.Markdown(height=420, show_label=False, elem_id="zk-refs-preview")
             with gr.Row():
-                save_zk_btn = gr.Button("💾 Save to Zettelkasten", variant="primary", size="lg")
+                zk_keyword_input = gr.Textbox(label="Folder name (editable)", scale=3, visible=False)
+                save_zk_btn = gr.Button("💾 Save to Zettelkasten", variant="primary", size="lg", scale=2)
 
         gr.Markdown("---")
         with gr.Accordion("Ask a follow-up question", open=False) as chat_accordion:
@@ -622,17 +803,21 @@ def main():
             download_transcript_button, download_summary_button,
             transcript_state, summary_state, title_state,
             metadata_output, chat_accordion,
+            timestamped_state,
         ]
 
         submit_button.click(
             gradio_interface,
-            inputs=[video_url_input, model_dropdown, language_dropdown],
+            inputs=[video_url_input, model_dropdown, language_dropdown, lecture_mode_toggle],
             outputs=gen_outputs,
         )
-        reset_button.click(reset_all, outputs=gen_outputs + [chatbot, zettelkasten_status, zk_state, zk_source_preview, zk_refs_preview, zk_preview_accordion])
+        reset_button.click(
+            reset_all,
+            outputs=gen_outputs + [chatbot, zettelkasten_status, zk_state, zk_source_preview, zk_refs_preview, zk_preview_accordion, zk_keyword_input],
+        )
         regenerate_button.click(
             regenerate_summary,
-            inputs=[transcript_state, model_dropdown, language_dropdown, title_state],
+            inputs=[transcript_state, model_dropdown, language_dropdown, title_state, lecture_mode_toggle, timestamped_state],
             outputs=[summary_output, download_summary_button, summary_state],
         )
         copy_summary_btn.click(
@@ -659,12 +844,12 @@ def main():
         )
         zettelkasten_btn.click(
             preview_zettelkasten_notes,
-            inputs=[transcript_state, video_url_input, model_dropdown, language_dropdown],
-            outputs=[zettelkasten_status, zk_source_preview, zk_refs_preview, zk_preview_accordion, zk_state],
+            inputs=[transcript_state, video_url_input, model_dropdown, language_dropdown, lecture_mode_toggle],
+            outputs=[zettelkasten_status, zk_source_preview, zk_refs_preview, zk_preview_accordion, zk_state, zk_keyword_input],
         )
         save_zk_btn.click(
             save_zettelkasten_notes,
-            inputs=[zk_state],
+            inputs=[zk_state, zk_keyword_input],
             outputs=[zettelkasten_status],
         )
 
