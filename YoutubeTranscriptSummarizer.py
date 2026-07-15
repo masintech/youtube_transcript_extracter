@@ -82,6 +82,38 @@ LANGUAGE_CONFIG = {
     },
 }
 
+DEFAULT_LANGUAGE_CHOICES = ["English", "Chinese"]
+
+
+def _resolve_lang_cfg(language_choice, detected_langs=None):
+    """Return lang_cfg dict for any language choice, including auto-detected ones."""
+    if language_choice in LANGUAGE_CONFIG:
+        return LANGUAGE_CONFIG[language_choice]
+    if detected_langs and language_choice in detected_langs:
+        code = detected_langs[language_choice]
+        return {"codes": [code], "instruction": "Write your summary in English."}
+    return LANGUAGE_CONFIG["English"]
+
+
+def detect_available_languages(video_url):
+    """Return (dropdown update with detected languages, detected_langs dict)."""
+    if not video_url or not video_url.strip():
+        return gr.update(), {}
+    try:
+        video_id = extract_video_id(video_url)
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        detected = {}
+        for t in transcript_list:
+            kind = "auto" if t.is_generated else "manual"
+            label = f"{t.language} ({kind})"
+            detected[label] = t.language_code
+        if not detected:
+            return gr.update(), {}
+        choices = list(detected.keys())
+        return gr.update(choices=choices, value=choices[0]), detected
+    except Exception as e:
+        return gr.update(info=f"⚠️ {e}"), {}
+
 
 def stream_response(model_choice, messages, system_message=None):
     """Unified streaming dispatcher for all models."""
@@ -232,10 +264,10 @@ def build_technical_summary_prompt(lang_cfg, transcript_text, use_timestamps=Fal
     return system_message, user_message
 
 
-def _stream_summary(transcript_text, model_choice, language_choice, note_mode="General", timestamped_transcript=None):
+def _stream_summary(transcript_text, model_choice, language_choice, note_mode="General", timestamped_transcript=None, detected_langs=None):
     """Yields incrementally accumulated summary string."""
     note_mode = _normalize_mode(note_mode)
-    lang_cfg = LANGUAGE_CONFIG[language_choice]
+    lang_cfg = _resolve_lang_cfg(language_choice, detected_langs)
     effective = timestamped_transcript if timestamped_transcript else transcript_text
     use_ts = bool(timestamped_transcript)
     if note_mode == "Lecture":
@@ -269,11 +301,11 @@ def format_metadata_card(metadata):
     return card
 
 
-def chat_respond(user_message, history, transcript_text, model_choice, free_mode, language_choice):
+def chat_respond(user_message, history, transcript_text, model_choice, free_mode, language_choice, detected_langs=None):
     if not user_message.strip():
         yield history, ""
         return
-    lang_instruction = LANGUAGE_CONFIG[language_choice]["instruction"]
+    lang_instruction = _resolve_lang_cfg(language_choice, detected_langs)["instruction"]
     if free_mode:
         system_message = (
             f"{lang_instruction}\n\n"
@@ -305,9 +337,9 @@ def chat_respond(user_message, history, transcript_text, model_choice, free_mode
         yield new_history, ""
 
 
-def gradio_interface(video_url, model_choice, language_choice, note_mode="General"):
+def gradio_interface(video_url, model_choice, language_choice, note_mode="General", detected_langs=None):
     note_mode = _normalize_mode(note_mode)
-    lang_cfg = LANGUAGE_CONFIG[language_choice]
+    lang_cfg = _resolve_lang_cfg(language_choice, detected_langs)
     video_id = extract_video_id(video_url)
     metadata = get_video_metadata(video_id)
 
@@ -317,7 +349,7 @@ def gradio_interface(video_url, model_choice, language_choice, note_mode="Genera
         yield "⚠️ Subtitles are disabled for this video.", "", None, None, "", "", "", gr.update(visible=False), gr.update(open=False), ""
         return
     except NoTranscriptFound:
-        yield f"⚠️ No {language_choice} transcript found for this video.", "", None, None, "", "", "", gr.update(visible=False), gr.update(open=False), ""
+        yield f"⚠️ No transcript found for '{language_choice}'.", "", None, None, "", "", "", gr.update(visible=False), gr.update(open=False), ""
         return
     except VideoUnavailable:
         yield "⚠️ This video is unavailable.", "", None, None, "", "", "", gr.update(visible=False), gr.update(open=False), ""
@@ -329,7 +361,7 @@ def gradio_interface(video_url, model_choice, language_choice, note_mode="Genera
     safe_title = _safe_filename(metadata['title'])
     summary = ""
 
-    for summary in _stream_summary(transcript_text, model_choice, language_choice, note_mode, timestamped_text):
+    for summary in _stream_summary(transcript_text, model_choice, language_choice, note_mode, timestamped_text, detected_langs):
         yield (
             transcript_text, summary, None, None,
             transcript_text, summary, safe_title,
@@ -353,13 +385,13 @@ def gradio_interface(video_url, model_choice, language_choice, note_mode="Genera
     )
 
 
-def regenerate_summary(transcript_text, model_choice, language_choice, safe_title, note_mode="General", timestamped_transcript=None):
+def regenerate_summary(transcript_text, model_choice, language_choice, safe_title, note_mode="General", timestamped_transcript=None, detected_langs=None):
     note_mode = _normalize_mode(note_mode)
     if not transcript_text:
         yield "⚠️ No transcript loaded. Please generate a transcript first.", None, ""
         return
     summary = ""
-    for summary in _stream_summary(transcript_text, model_choice, language_choice, note_mode, timestamped_transcript):
+    for summary in _stream_summary(transcript_text, model_choice, language_choice, note_mode, timestamped_transcript, detected_langs):
         yield summary, None, summary
 
     filename = f"{safe_title}_summary.md" if safe_title else "summary.md"
@@ -382,6 +414,8 @@ def reset_all():
         gr.update(value=""),
         gr.update(visible=False, open=False),
         gr.update(value="", visible=False),
+        gr.update(choices=DEFAULT_LANGUAGE_CHOICES, value="English"),
+        {},
     )
 
 
@@ -700,7 +734,7 @@ def build_zettelkasten_technical_prompt(transcript_text, metadata, video_url, la
     return system_message, user_message
 
 
-def preview_zettelkasten_notes(transcript_text, video_url, model_choice, language_choice, note_mode="General"):
+def preview_zettelkasten_notes(transcript_text, video_url, model_choice, language_choice, note_mode="General", detected_langs=None):
     """Generator yielding (status, source_preview, refs_preview, accordion, zk_state, zk_keyword_input)."""
     note_mode = _normalize_mode(note_mode)
     _nc = gr.update()
@@ -710,7 +744,7 @@ def preview_zettelkasten_notes(transcript_text, video_url, model_choice, languag
         yield gr.update(value="⚠️ No transcript loaded. Generate a transcript first.", visible=True), _nc, _nc, _hidden, None, _nc
         return
 
-    lang_cfg = LANGUAGE_CONFIG[language_choice]
+    lang_cfg = _resolve_lang_cfg(language_choice, detected_langs)
     yield gr.update(value="⏳ Fetching video metadata…", visible=True), _nc, _nc, _hidden, None, _nc
 
     try:
@@ -921,6 +955,7 @@ def main():
         summary_state = gr.State("")
         title_state = gr.State("")
         timestamped_state = gr.State("")
+        detected_langs_state = gr.State({})
 
         with gr.Row(equal_height=True):
             with gr.Column(scale=4):
@@ -936,10 +971,12 @@ def main():
                 )
             with gr.Column(scale=1):
                 language_dropdown = gr.Dropdown(
-                    choices=["English", "Chinese"],
-                    label="Language",
+                    choices=DEFAULT_LANGUAGE_CHOICES,
+                    label="Subtitle Language",
                     value="English",
                 )
+            with gr.Column(scale=0, min_width=90):
+                detect_langs_btn = gr.Button("🔍 Detect", size="sm", variant="secondary")
 
         with gr.Row():
             submit_button = gr.Button("Generate Transcript & Summary", variant="primary", size="lg", scale=4)
@@ -1005,18 +1042,27 @@ def main():
             timestamped_state,
         ]
 
+        detect_langs_btn.click(
+            detect_available_languages,
+            inputs=[video_url_input],
+            outputs=[language_dropdown, detected_langs_state],
+        )
         submit_button.click(
             gradio_interface,
-            inputs=[video_url_input, model_dropdown, language_dropdown, mode_dropdown],
+            inputs=[video_url_input, model_dropdown, language_dropdown, mode_dropdown, detected_langs_state],
             outputs=gen_outputs,
         )
         reset_button.click(
             reset_all,
-            outputs=gen_outputs + [chatbot, zettelkasten_status, zk_state, zk_source_preview, zk_refs_preview, zk_preview_accordion, zk_keyword_input],
+            outputs=gen_outputs + [
+                chatbot, zettelkasten_status, zk_state,
+                zk_source_preview, zk_refs_preview, zk_preview_accordion,
+                zk_keyword_input, language_dropdown, detected_langs_state,
+            ],
         )
         regenerate_button.click(
             regenerate_summary,
-            inputs=[transcript_state, model_dropdown, language_dropdown, title_state, mode_dropdown, timestamped_state],
+            inputs=[transcript_state, model_dropdown, language_dropdown, title_state, mode_dropdown, timestamped_state, detected_langs_state],
             outputs=[summary_output, download_summary_button, summary_state],
         )
         copy_summary_btn.click(
@@ -1033,17 +1079,17 @@ def main():
         )
         chat_button.click(
             chat_respond,
-            inputs=[chat_input, chatbot, transcript_state, model_dropdown, free_mode_toggle, language_dropdown],
+            inputs=[chat_input, chatbot, transcript_state, model_dropdown, free_mode_toggle, language_dropdown, detected_langs_state],
             outputs=[chatbot, chat_input],
         )
         chat_input.submit(
             chat_respond,
-            inputs=[chat_input, chatbot, transcript_state, model_dropdown, free_mode_toggle, language_dropdown],
+            inputs=[chat_input, chatbot, transcript_state, model_dropdown, free_mode_toggle, language_dropdown, detected_langs_state],
             outputs=[chatbot, chat_input],
         )
         zettelkasten_btn.click(
             preview_zettelkasten_notes,
-            inputs=[transcript_state, video_url_input, model_dropdown, language_dropdown, mode_dropdown],
+            inputs=[transcript_state, video_url_input, model_dropdown, language_dropdown, mode_dropdown, detected_langs_state],
             outputs=[zettelkasten_status, zk_source_preview, zk_refs_preview, zk_preview_accordion, zk_state, zk_keyword_input],
         )
         save_zk_btn.click(
